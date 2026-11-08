@@ -1,0 +1,102 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-3ds:
+    name: 3DS app
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitarm:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build .3dsx
+        working-directory: 3ds
+        run: make APP_VERSION="${GITHUB_SHA::7}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wa3ds-3dsx
+          path: 3ds/wa3ds.3dsx
+          if-no-files-found: error
+
+  build-bridge:
+    name: Bridge (${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: bridge/go.mod
+          cache-dependency-path: bridge/go.sum
+
+      - name: Build
+        working-directory: bridge
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go vet ./...
+          go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_SHA::7}" \
+            -o dist/wa3ds-bridge-linux-${{ matrix.goarch }} .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wa3ds-bridge-${{ matrix.goarch }}
+          path: bridge/dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish rolling release
+    needs: [build-3ds, build-bridge]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: rolling
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Move rolling tag to this commit
+        run: |
+          if gh api "repos/$GH_REPO/git/refs/tags/$TAG" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/$TAG" -f sha="$GITHUB_SHA" -F force=true
+          else
+            gh api -X POST "repos/$GH_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA"
+          fi
+
+      - name: Create or update release
+        run: |
+          short="${GITHUB_SHA::7}"
+          notes="Automated build of \`$short\` from \`main\` ($(date -u +'%Y-%m-%d %H:%M UTC')).
+
+          - \`wa3ds.3dsx\`: copy to \`sd:/3ds/\` and launch from the Homebrew Launcher
+          - \`wa3ds-bridge-linux-*\`: bridge server for your VPS"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "Rolling build ($short)" --notes "$notes" --prerelease
+          else
+            gh release create "$TAG" --title "Rolling build ($short)" --notes "$notes" --prerelease --verify-tag
+          fi
+
+      - name: Upload assets
+        run: gh release upload "$TAG" dist/* --clobber

@@ -1,0 +1,16 @@
+# 3DS build output
+3ds/build/
+*.3dsx
+*.elf
+*.smdh
+*.map
+*.cia
+
+# Bridge
+bridge/bridge
+bridge/dist/
+*.db
+*.db-*
+.env
+
+.DS_Store
