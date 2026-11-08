@@ -24,7 +24,10 @@ jobs:
       - name: Install 3DS libraries
         run: |
           dkp-pacman -Sy --noconfirm --needed 3ds-mbedtls 3ds-libjpeg-turbo
-          grep -m1 'define MBEDTLS_VERSION_STRING ' "$DEVKITPRO/portlibs/3ds/include/mbedtls/build_info.h" "$DEVKITPRO/portlibs/3ds/include/mbedtls/version.h" 2>/dev/null || true
+          grep -m1 'define MBEDTLS_VERSION_STRING ' "$DEVKITPRO/portlibs/3ds/include/mbedtls/version.h"
+          # certificate pinning reads the peer certificate after the handshake
+          grep -E '^#define MBEDTLS_SSL_KEEP_PEER_CERTIFICATE' "$DEVKITPRO/portlibs/3ds/include/mbedtls/config.h" \
+            || { echo "::error::mbedTLS built without MBEDTLS_SSL_KEEP_PEER_CERTIFICATE"; exit 1; }
 
       - name: Build .3dsx
         working-directory: 3ds
