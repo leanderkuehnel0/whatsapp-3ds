@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [main]
+    branches: ['**']
   pull_request:
   workflow_dispatch:
 
@@ -20,6 +20,11 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v5
+
+      - name: Install 3DS libraries
+        run: |
+          dkp-pacman -Sy --noconfirm --needed 3ds-mbedtls 3ds-libjpeg-turbo
+          grep -m1 'define MBEDTLS_VERSION_STRING ' "$DEVKITPRO/portlibs/3ds/include/mbedtls/build_info.h" "$DEVKITPRO/portlibs/3ds/include/mbedtls/version.h" 2>/dev/null || true
 
       - name: Build .3dsx
         working-directory: 3ds

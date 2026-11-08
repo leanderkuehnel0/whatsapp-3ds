@@ -35,7 +35,7 @@ APP_VERSION     ?= dev
 #---------------------------------------------------------------------------------
 ARCH    := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 
-CFLAGS  := -g -Wall -O2 -mword-relocations \
+CFLAGS  := -g -Wall -Wno-format-truncation -O2 -mword-relocations \
            -ffunction-sections \
            $(ARCH)
 
@@ -46,7 +46,7 @@ CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++17
 ASFLAGS := -g $(ARCH)
 LDFLAGS  = -specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS    := -lcitro2d -lcitro3d -lctru -lm
+LIBS    := -lmbedtls -lmbedx509 -lmbedcrypto -ljpeg -lcitro2d -lcitro3d -lctru -lm
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing
