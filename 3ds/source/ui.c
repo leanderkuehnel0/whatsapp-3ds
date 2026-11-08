@@ -346,12 +346,17 @@ static void draw_top_chats(void)
 	C2D_TextBufClear(tbuf);
 	header("WA3DS", TOP_W, HEADER_H, status_label());
 
-	if (g_app.nchats == 0) {
+	if (g_app.nvis == 0 && g_app.search[0]) {
+		char t[128];
+		snprintf(t, sizeof t, "No chats match \"%s\"", g_app.search);
+		text(t, TOP_W / 2, 90, 0.55f, COL_TEXT, C2D_AlignCenter);
+		text("Press Y to search again, B to show all chats", TOP_W / 2, 118, 0.45f, COL_MUTED, C2D_AlignCenter);
+	} else if (g_app.nchats == 0) {
 		text("No chats yet.", TOP_W / 2, 90, 0.6f, COL_TEXT, C2D_AlignCenter);
 		text("New messages will appear here. Older chats arrive\nshortly after you first link the bridge.",
 		     TOP_W / 2, 120, 0.45f, COL_MUTED, C2D_AlignCenter);
-	} else if (g_app.chat_sel >= 0 && g_app.chat_sel < g_app.nchats) {
-		Chat *c = &g_app.chats[g_app.chat_sel];
+	} else if (chat_at(g_app.chat_sel)) {
+		Chat *c = chat_at(g_app.chat_sel);
 		rect(10, 30, TOP_W - 20, 150, COL_WHITE);
 		text_fit(c->name, 20, 38, TOP_W - 40, 0.7f, COL_TEXT);
 		char t[32];
@@ -367,7 +372,8 @@ static void draw_top_chats(void)
 		text(w, 20, 86, 0.5f, COL_TEXT, 0);
 		free(w);
 	}
-	text("A: open   X: refresh   SELECT: settings   START: quit", TOP_W / 2, 196, 0.4f, COL_MUTED, C2D_AlignCenter);
+	text(g_app.search[0] ? "A: open   Y: search   B: show all   SELECT: settings" : "A: open   Y: search   X: refresh   SELECT: settings   START: quit",
+	     TOP_W / 2, 196, 0.4f, COL_MUTED, C2D_AlignCenter);
 	if (g_app.own_name[0]) {
 		char me[96];
 		snprintf(me, sizeof me, "Linked as %s", g_app.own_name);
@@ -449,7 +455,7 @@ int ui_chat_row_at(int y)
 	if (y < BOT_HEADER_H)
 		return -1;
 	int i = (int)((y - BOT_HEADER_H + g_app.chat_scroll) / ROW_H);
-	return i >= 0 && i < g_app.nchats ? i : -1;
+	return i >= 0 && i < g_app.nvis ? i : -1;
 }
 
 static void draw_bot_chats(void)
@@ -458,11 +464,13 @@ static void draw_bot_chats(void)
 	C2D_SceneBegin(bot);
 	C2D_TextBufClear(tbuf);
 
-	for (int i = 0; i < g_app.nchats; i++) {
+	for (int i = 0; i < g_app.nvis; i++) {
 		float y = BOT_HEADER_H + i * ROW_H - g_app.chat_scroll;
 		if (y + ROW_H < BOT_HEADER_H || y > SCR_H)
 			continue;
-		Chat *c = &g_app.chats[i];
+		Chat *c = chat_at(i);
+		if (!c)
+			continue;
 		if (i == g_app.chat_sel)
 			rect(0, y, BOT_W, ROW_H, COL_ROW_SEL);
 		char t[24];
@@ -480,9 +488,14 @@ static void draw_bot_chats(void)
 		rect(8, y + ROW_H - 1, BOT_W - 16, 1, COL_LINE);
 	}
 
-	char title[32];
-	snprintf(title, sizeof title, "Chats (%d)", g_app.nchats);
-	header(title, BOT_W, BOT_HEADER_H, NULL);
+	char title[96];
+	if (g_app.search[0]) {
+		snprintf(title, sizeof title, "\"%s\" (%d)", g_app.search, g_app.nvis);
+		header(title, BOT_W, BOT_HEADER_H, "Clear (B)");
+	} else {
+		snprintf(title, sizeof title, "Chats (%d)", g_app.nchats);
+		header(title, BOT_W, BOT_HEADER_H, "Search (Y)");
+	}
 }
 
 static const char *btn_labels[5] = {"Write (A)", "Image (Y)", "Call (X)", "Older (L)", "Back (B)"};

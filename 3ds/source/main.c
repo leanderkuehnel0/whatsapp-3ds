@@ -109,6 +109,33 @@ static touchPosition touch_start;
 static float scroll_start;
 static bool dragging, touching;
 
+static void search_chats(void)
+{
+	SwkbdState kb;
+	char buf[64];
+	swkbdInit(&kb, SWKBD_TYPE_NORMAL, 2, sizeof buf - 1);
+	swkbdSetHintText(&kb, "Search chats by name or number");
+	if (g_app.search[0])
+		swkbdSetInitialText(&kb, g_app.search);
+	swkbdSetButton(&kb, SWKBD_BUTTON_RIGHT, "Search", true);
+	if (swkbdInputText(&kb, buf, sizeof buf) != SWKBD_BUTTON_CONFIRM)
+		return;
+	size_t n = strlen(buf);
+	while (n > 0 && buf[n - 1] == ' ')
+		buf[--n] = 0;
+	strlcpy_utf8(g_app.search, buf, sizeof g_app.search);
+	g_app.chat_sel = 0;
+	g_app.chat_scroll = 0;
+	chats_filter();
+	g_app.chat_sel = 0;
+}
+
+static void clear_search(void)
+{
+	g_app.search[0] = 0;
+	chats_filter();
+}
+
 static void input_chats(u32 down, u32 repeat, u32 held)
 {
 	if (down & KEY_SELECT) {
@@ -117,20 +144,29 @@ static void input_chats(u32 down, u32 repeat, u32 held)
 	}
 	if (down & KEY_X)
 		client_request_chats();
+	if (down & KEY_Y) {
+		search_chats();
+		return;
+	}
+	if (down & KEY_B && g_app.search[0]) {
+		clear_search();
+		return;
+	}
 
-	if (repeat & KEY_DOWN && g_app.chat_sel < g_app.nchats - 1)
+	int n = g_app.nvis;
+	if (repeat & KEY_DOWN && g_app.chat_sel < n - 1)
 		g_app.chat_sel++;
 	if (repeat & KEY_UP && g_app.chat_sel > 0)
 		g_app.chat_sel--;
 	if (repeat & KEY_RIGHT)
-		g_app.chat_sel = g_app.chat_sel + 5 < g_app.nchats ? g_app.chat_sel + 5 : g_app.nchats - 1;
+		g_app.chat_sel = g_app.chat_sel + 5 < n ? g_app.chat_sel + 5 : n - 1;
 	if (repeat & KEY_LEFT)
 		g_app.chat_sel = g_app.chat_sel - 5 > 0 ? g_app.chat_sel - 5 : 0;
 	if (g_app.chat_sel < 0)
 		g_app.chat_sel = 0;
 
 	float list_h = SCR_H - 24;
-	float max_scroll = g_app.nchats * 44.0f - list_h;
+	float max_scroll = n * 44.0f - list_h;
 	if (max_scroll < 0)
 		max_scroll = 0;
 
@@ -147,7 +183,7 @@ static void input_chats(u32 down, u32 repeat, u32 held)
 	if (abs(cp.dy) > 20)
 		g_app.chat_scroll -= cp.dy / 20.0f;
 
-	// touch: drag to scroll, tap to open
+	// touch: drag to scroll, tap a row to open, tap the header to search
 	touchPosition tp;
 	hidTouchRead(&tp);
 	if (down & KEY_TOUCH) {
@@ -164,10 +200,17 @@ static void input_chats(u32 down, u32 repeat, u32 held)
 	} else if (touching && !(held & KEY_TOUCH)) {
 		touching = false;
 		if (!dragging) {
+			if (touch_start.py < 24) {
+				if (g_app.search[0] && touch_start.px > BOT_W - 70)
+					clear_search();
+				else
+					search_chats();
+				return;
+			}
 			int row = ui_chat_row_at(touch_start.py);
 			if (row >= 0) {
 				g_app.chat_sel = row;
-				client_open_chat(&g_app.chats[row]);
+				client_open_chat(chat_at(row));
 				return;
 			}
 		}
@@ -178,8 +221,8 @@ static void input_chats(u32 down, u32 repeat, u32 held)
 	if (g_app.chat_scroll < 0)
 		g_app.chat_scroll = 0;
 
-	if (down & KEY_A && g_app.chat_sel < g_app.nchats)
-		client_open_chat(&g_app.chats[g_app.chat_sel]);
+	if (down & KEY_A && chat_at(g_app.chat_sel))
+		client_open_chat(chat_at(g_app.chat_sel));
 }
 
 static void leave_chat(void)

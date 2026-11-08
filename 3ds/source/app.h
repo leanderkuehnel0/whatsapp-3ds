@@ -54,7 +54,7 @@ bool net_poll(LineHandler on_line, BinHandler on_bin);
 size_t net_bin_progress(size_t *total);
 
 // ---------------------------------------------------------------- model.c
-#define MAX_CHATS 200
+#define MAX_CHATS 600
 #define MAX_MSGS  400
 
 typedef struct {
@@ -94,7 +94,11 @@ typedef struct {
 
 	Chat   chats[MAX_CHATS];
 	int    nchats;
-	int    chat_sel;
+	// the list as shown: indices into chats matching the search (all chats when no search)
+	int    vis[MAX_CHATS];
+	int    nvis;
+	char   search[64];
+	int    chat_sel;      // index into vis
 	float  chat_scroll;
 
 	char   cur_jid[72];
@@ -137,7 +141,9 @@ typedef struct {
 extern App g_app;
 
 Chat *chat_find(const char *jid);
-void  chats_sort(void);
+void  chats_sort(void);   // sorts newest first and re-applies the search filter
+void  chats_filter(void); // re-applies the search filter, keeping the selection
+Chat *chat_at(int i);     // i-th chat in the shown list, or NULL
 void  msgs_clear(void);
 Msg  *msg_find(const char *id);
 void  msgs_layout(void);

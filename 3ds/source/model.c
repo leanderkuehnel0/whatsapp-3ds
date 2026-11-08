@@ -22,15 +22,84 @@ static int chat_cmp(const void *a, const void *b)
 	return ta < tb ? 1 : ta > tb ? -1 : 0;
 }
 
+Chat *chat_at(int i)
+{
+	// the list may be mid-refresh (nchats reset while vis is stale): check both bounds
+	if (i < 0 || i >= g_app.nvis || g_app.vis[i] >= g_app.nchats)
+		return NULL;
+	return &g_app.chats[g_app.vis[i]];
+}
+
+// Appends the case-folded UTF-8 of s to out (ASCII and Latin-1 letters, so "ö" matches "Ö").
+static void fold(const char *s, char *out, size_t n)
+{
+	size_t o = 0;
+	while (*s && o + 4 < n) {
+		u32 cp;
+		ssize_t len = decode_utf8(&cp, (const uint8_t *)s);
+		if (len <= 0) {
+			s++;
+			continue;
+		}
+		s += len;
+		if (cp >= 'A' && cp <= 'Z')
+			cp += 32;
+		else if (cp >= 0xC0 && cp <= 0xDE && cp != 0xD7)
+			cp += 32;
+		o += encode_utf8((uint8_t *)out + o, cp);
+	}
+	out[o] = 0;
+}
+
+static bool chat_matches(const Chat *c, const char *needle)
+{
+	char hay[200];
+	fold(c->name, hay, sizeof hay);
+	if (strstr(hay, needle))
+		return true;
+	// also match phone numbers, ignoring a leading "+"
+	const char *n = needle[0] == '+' ? needle + 1 : needle;
+	return n[0] >= '0' && n[0] <= '9' && strstr(c->jid, n) != NULL;
+}
+
+void chats_filter(void)
+{
+	const Chat *sel = chat_at(g_app.chat_sel);
+	char seljid[72] = "";
+	if (sel)
+		strcpy(seljid, sel->jid);
+
+	char needle[128];
+	fold(g_app.search, needle, sizeof needle);
+	g_app.nvis = 0;
+	for (int i = 0; i < g_app.nchats; i++)
+		if (!needle[0] || chat_matches(&g_app.chats[i], needle))
+			g_app.vis[g_app.nvis++] = i;
+
+	g_app.chat_sel = 0;
+	for (int i = 0; i < g_app.nvis; i++)
+		if (!strcmp(g_app.chats[g_app.vis[i]].jid, seljid))
+			g_app.chat_sel = i;
+}
+
+static int chat_cmp(const void *a, const void *b)
+{
+	s64 ta = ((const Chat *)a)->ts, tb = ((const Chat *)b)->ts;
+	return ta < tb ? 1 : ta > tb ? -1 : 0;
+}
+
 void chats_sort(void)
 {
 	// keep the selection on the same chat across reordering
-	char sel[72] = "";
-	if (g_app.chat_sel >= 0 && g_app.chat_sel < g_app.nchats)
-		strcpy(sel, g_app.chats[g_app.chat_sel].jid);
+	const Chat *sel = chat_at(g_app.chat_sel);
+	char seljid[72] = "";
+	if (sel)
+		strcpy(seljid, sel->jid);
 	qsort(g_app.chats, g_app.nchats, sizeof(Chat), chat_cmp);
-	for (int i = 0; i < g_app.nchats; i++)
-		if (strcmp(g_app.chats[i].jid, sel) == 0)
+	g_app.nvis = 0;
+	chats_filter();
+	for (int i = 0; i < g_app.nvis; i++)
+		if (!strcmp(g_app.chats[g_app.vis[i]].jid, seljid))
 			g_app.chat_sel = i;
 }
 

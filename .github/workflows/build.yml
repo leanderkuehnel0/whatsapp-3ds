@@ -41,6 +41,57 @@ jobs:
           path: 3ds/wa3ds.3dsx
           if-no-files-found: error
 
+      # the ELF is only an input for the CIA job, not a release asset
+      - uses: actions/upload-artifact@v5
+        with:
+          name: build-3ds-elf
+          path: 3ds/wa3ds.elf
+          if-no-files-found: error
+          retention-days: 3
+
+  package-cia:
+    name: 3DS .cia
+    needs: build-3ds
+    runs-on: ubuntu-latest
+    env:
+      MAKEROM_URL: https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.19.0/makerom-v0.19.0-ubuntu_x86_64.zip
+      BANNERTOOL_URL: https://github.com/carstene1ns/3ds-bannertool/releases/download/1.2.3/bannertool-1.2.3-linux.tar.gz
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v6
+        with:
+          name: build-3ds-elf
+          path: 3ds
+
+      - name: Install makerom and bannertool
+        run: |
+          mkdir -p "$RUNNER_TEMP/tools"
+          cd "$RUNNER_TEMP/tools"
+          curl -fsSL -o makerom.zip "$MAKEROM_URL"
+          unzip -q makerom.zip
+          curl -fsSL "$BANNERTOOL_URL" | tar xz --strip-components=1
+          chmod +x makerom bannertool
+          echo "$RUNNER_TEMP/tools" >> "$GITHUB_PATH"
+
+      - name: Build .cia
+        working-directory: 3ds
+        run: |
+          bannertool makebanner -i assets/banner.png -a assets/banner.wav -o wa3ds.bnr
+          bannertool makesmdh -s "WA3DS" -l "WA3DS - WhatsApp for 3DS (${GITHUB_SHA::7})" \
+            -p "leanderkuehnel0" -i assets/icon.png -o wa3ds.icn
+          makerom -f cia -o wa3ds.cia -target t -exefslogo -rsf cia.rsf \
+            -elf wa3ds.elf -icon wa3ds.icn -banner wa3ds.bnr \
+            -major 1 -minor 0 -micro 0
+          ls -l wa3ds.cia
+          test -s wa3ds.cia
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: wa3ds-cia
+          path: 3ds/wa3ds.cia
+          if-no-files-found: error
+
   build-bridge:
     name: Bridge (${{ matrix.goarch }})
     runs-on: ubuntu-latest
@@ -74,7 +125,7 @@ jobs:
 
   release:
     name: Publish rolling release
-    needs: [build-3ds, build-bridge]
+    needs: [build-3ds, package-cia, build-bridge]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -87,6 +138,7 @@ jobs:
       - uses: actions/download-artifact@v6
         with:
           path: dist
+          pattern: wa3ds-*
           merge-multiple: true
 
       - name: Move rolling tag to this commit
@@ -102,7 +154,8 @@ jobs:
           short="${GITHUB_SHA::7}"
           notes="Automated build of \`$short\` from \`main\` ($(date -u +'%Y-%m-%d %H:%M UTC')).
 
-          - \`wa3ds.3dsx\`: copy to \`sd:/3ds/\` and launch from the Homebrew Launcher
+          - \`wa3ds.cia\`: install with FBI (shows up on the HOME Menu)
+          - \`wa3ds.3dsx\`: or copy to \`sd:/3ds/\` and launch from the Homebrew Launcher
           - \`wa3ds-bridge-linux-*\`: bridge server for your VPS"
 
           if gh release view "$TAG" >/dev/null 2>&1; then

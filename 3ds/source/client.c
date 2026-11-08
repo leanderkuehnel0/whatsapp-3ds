@@ -496,8 +496,6 @@ void client_on_line(char **f, int n)
 			if (p->count == 0)
 				g_app.nchats = 0;
 			chats_sort();
-			if (g_app.chat_sel >= g_app.nchats)
-				g_app.chat_sel = g_app.nchats ? g_app.nchats - 1 : 0;
 		}
 		break;
 

@@ -21,6 +21,7 @@ SOURCES     := source
 DATA        := data
 INCLUDES    := include
 GRAPHICS    := gfx
+ICON        := assets/icon.png
 ROMFS       :=
 
 APP_TITLE       := WA3DS

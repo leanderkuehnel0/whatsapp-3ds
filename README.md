@@ -13,6 +13,7 @@ The two talk over a TLS connection protected by a token. The console pins the br
 
 - 1:1 and group chats, with live updates pushed from the bridge
 - Sending text messages (multi-line)
+- Searching chats by name or phone number
 - Viewing photos, stickers and video thumbnails, which the bridge shrinks to fit the screen
 - Read receipts, unread counters, edits and deletions
 - Recent chat history synced when you first link
@@ -24,7 +25,8 @@ Every push to `main` is built in GitHub Actions and published to the [`rolling` 
 
 | File | What it's for |
 |---|---|
-| `wa3ds.3dsx` | the 3DS app |
+| `wa3ds.cia` | the 3DS app as a HOME Menu title (install with FBI) |
+| `wa3ds.3dsx` | the 3DS app for the Homebrew Launcher |
 | `wa3ds-bridge-linux-amd64` | the bridge for x86-64 servers |
 | `wa3ds-bridge-linux-arm64` | the bridge for ARM servers (e.g. Hetzner CAX, Oracle Ampere, Raspberry Pi) |
 
@@ -67,7 +69,7 @@ The token is stored in `/var/lib/wa3ds/token`. To change it, edit that file (or 
 
 ## 2. Set up the 3DS
 
-1. Copy `wa3ds.3dsx` to `sd:/3ds/` on the SD card. You can also send it over Wi-Fi: open the Homebrew Launcher, press Y, then run `3dslink wa3ds.3dsx` on your computer.
+1. Install `wa3ds.cia` with FBI so WA3DS appears on the HOME Menu, or copy `wa3ds.3dsx` to `sd:/3ds/` to run it from the Homebrew Launcher. New `.cia` builds install over the old one, and your settings are kept. You can also send it over Wi-Fi: open the Homebrew Launcher, press Y, then run `3dslink wa3ds.3dsx` on your computer.
 2. Start **WA3DS** from the Homebrew Launcher.
 3. Enter the bridge address (domain or IP), the port (7473) and the token.
 4. On first connect, the app shows the bridge's certificate fingerprint. Check that it matches the one the bridge printed, then press **A**.
@@ -81,6 +83,8 @@ The settings are saved in `sd:/3ds/wa3ds/config.ini`. You can also edit them the
 | Where | Control | Action |
 |---|---|---|
 | Chat list | D-Pad / Circle Pad / drag on touchscreen | Scroll |
+| | Y or tap the header | Search chats by name or number |
+| | B | Clear the search |
 | | A or tap | Open chat |
 | | X | Refresh |
 | | SELECT | Settings |

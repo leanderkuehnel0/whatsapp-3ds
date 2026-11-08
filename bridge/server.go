@@ -316,7 +316,7 @@ func (s *Server) dispatch(c *Conn, tag, cmd string, args []string) error {
 		return c.writeLines(line(tag, "OK"))
 
 	case "CHATS":
-		chats, err := b.store.Chats(ctx, 200)
+		chats, err := b.store.Chats(ctx, 600)
 		if err != nil {
 			return errLine(err)
 		}
