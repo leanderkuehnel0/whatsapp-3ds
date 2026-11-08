@@ -99,7 +99,7 @@ jobs:
           grep -qi "000400000f3da500" cia-info.txt || { echo "::error::unexpected title ID"; exit 1; }
           echo "services and title ID OK"
           # the code must not be compressed (see EnableCompress in cia.rsf)
-          grep -iE "compress" cia-info.txt || true
+          grep -niE "flag|compress|sd ?app" cia-info.txt | head -20 || true
           if grep -iE "compress(ed)? ?(exefs ?)?code[^:]*: *(yes|true|1)" cia-info.txt; then
             echo "::error::.cia code is compressed"; exit 1
           fi
