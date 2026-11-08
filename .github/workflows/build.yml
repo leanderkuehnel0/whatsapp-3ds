@@ -15,14 +15,17 @@ jobs:
     name: 3DS app
     runs-on: ubuntu-latest
     container: devkitpro/devkitarm:latest
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Build .3dsx
         working-directory: 3ds
         run: make APP_VERSION="${GITHUB_SHA::7}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: wa3ds-3dsx
           path: 3ds/wa3ds.3dsx
@@ -35,9 +38,9 @@ jobs:
       matrix:
         goarch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: bridge/go.mod
           cache-dependency-path: bridge/go.sum
@@ -53,7 +56,7 @@ jobs:
           go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_SHA::7}" \
             -o dist/wa3ds-bridge-linux-${{ matrix.goarch }} .
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: wa3ds-bridge-${{ matrix.goarch }}
           path: bridge/dist/*
@@ -71,7 +74,7 @@ jobs:
       GH_REPO: ${{ github.repository }}
       TAG: rolling
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v6
         with:
           path: dist
           merge-multiple: true
