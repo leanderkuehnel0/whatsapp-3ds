@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <malloc.h>
 #include <netdb.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -103,7 +104,22 @@ static void sha256(const unsigned char *in, size_t len, unsigned char out[32])
 
 bool net_connected(void) { return tls_ready; }
 
-void net_close(void)
+// ---------------------------------------------------------------- connecting
+// Connecting runs on a worker thread so the UI stays responsive (and SELECT works)
+// while a bridge is unreachable. All TLS state belongs to the worker until it finishes.
+
+#define CONNECT_TIMEOUT_MS   8000
+#define HANDSHAKE_TIMEOUT_MS 20000
+
+static Thread        conn_thread;
+static volatile bool conn_cancel;
+static volatile int  conn_result; // 0 running, 1 ok, -1 failed
+static char          conn_host[128];
+static int           conn_port;
+static unsigned char conn_fp[32];
+static char          conn_err[128];
+
+static void tls_teardown(void)
 {
 	if (tls_ready) {
 		mbedtls_ssl_close_notify(&ssl);
@@ -125,16 +141,51 @@ void net_close(void)
 	bin_len = bin_got = 0;
 }
 
+static void conn_stop(void)
+{
+	if (!conn_thread)
+		return;
+	conn_cancel = true;
+	threadJoin(conn_thread, U64_MAX);
+	threadFree(conn_thread);
+	conn_thread = NULL;
+}
+
+void net_close(void)
+{
+	conn_stop();
+	tls_teardown();
+}
+
 static bool fail(char *err, size_t errlen, const char *what, int code)
 {
-	snprintf(err, errlen, "%s (%d)", what, code);
-	net_close();
+	if (code)
+		snprintf(err, errlen, "%s (%d)", what, code);
+	else
+		snprintf(err, errlen, "%s", what);
+	tls_teardown();
 	return false;
 }
 
-bool net_connect(const char *host, int port, unsigned char fp[32], char *err, size_t errlen)
+// Waits until the socket is readable/writable. Returns 1 ready, 0 timed out, -1 cancelled.
+static int wait_sock(short events, u64 deadline)
 {
-	net_close();
+	while (!conn_cancel) {
+		if (osGetTime() >= deadline)
+			return 0;
+		struct pollfd pfd = {.fd = sock, .events = events};
+		int r = poll(&pfd, 1, 200);
+		if (r > 0)
+			return 1;
+		if (r < 0 && errno != EINTR)
+			return 1; // let the next socket call report the actual error
+	}
+	return -1;
+}
+
+static bool connect_blocking(const char *host, int port, unsigned char fp[32], char *err, size_t errlen)
+{
+	tls_teardown();
 	mbedtls_ssl_init(&ssl);
 	mbedtls_ssl_config_init(&conf);
 	mbedtls_ctr_drbg_init(&drbg);
@@ -150,17 +201,33 @@ bool net_connect(const char *host, int port, unsigned char fp[32], char *err, si
 	hints.ai_socktype = SOCK_STREAM;
 	int r = getaddrinfo(host, portstr, &hints, &res);
 	if (r != 0 || !res)
-		return fail(err, errlen, "Could not resolve host", r);
+		return fail(err, errlen, "Could not find the bridge address", r);
+	if (conn_cancel) {
+		freeaddrinfo(res);
+		return fail(err, errlen, "Cancelled", 0);
+	}
 
 	sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	if (sock < 0) {
 		freeaddrinfo(res);
 		return fail(err, errlen, "socket() failed", errno);
 	}
+	fcntl(sock, F_SETFL, fcntl(sock, F_GETFL, 0) | O_NONBLOCK);
 	r = connect(sock, res->ai_addr, res->ai_addrlen);
 	freeaddrinfo(res);
-	if (r < 0)
-		return fail(err, errlen, "Could not connect to bridge", errno);
+	if (r < 0 && errno != EINPROGRESS && errno != EALREADY && errno != EWOULDBLOCK)
+		return fail(err, errlen, "Could not connect to the bridge", errno);
+	if (r < 0) {
+		int w = wait_sock(POLLOUT, osGetTime() + CONNECT_TIMEOUT_MS);
+		if (w < 0)
+			return fail(err, errlen, "Cancelled", 0);
+		if (w == 0)
+			return fail(err, errlen, "The bridge is not reachable (timed out).\nIs it running, and is the address right?", 0);
+		int soerr = 0;
+		socklen_t len = sizeof soerr;
+		if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &soerr, &len) == 0 && soerr != 0)
+			return fail(err, errlen, "Could not connect to the bridge", soerr);
+	}
 
 	mbedtls_entropy_add_source(&entropy, entropy_source, NULL, 32, MBEDTLS_ENTROPY_SOURCE_STRONG);
 	const char *pers = "wa3ds";
@@ -179,19 +246,73 @@ bool net_connect(const char *host, int port, unsigned char fp[32], char *err, si
 		return fail(err, errlen, "TLS setup failed", r);
 	mbedtls_ssl_set_bio(&ssl, NULL, bio_send, bio_recv, NULL);
 
+	u64 deadline = osGetTime() + HANDSHAKE_TIMEOUT_MS;
 	while ((r = mbedtls_ssl_handshake(&ssl)) != 0) {
 		if (r != MBEDTLS_ERR_SSL_WANT_READ && r != MBEDTLS_ERR_SSL_WANT_WRITE)
-			return fail(err, errlen, "TLS handshake failed", r);
+			return fail(err, errlen, "TLS handshake failed - is this really the bridge?", r);
+		int w = wait_sock(r == MBEDTLS_ERR_SSL_WANT_READ ? POLLIN : POLLOUT, deadline);
+		if (w < 0)
+			return fail(err, errlen, "Cancelled", 0);
+		if (w == 0)
+			return fail(err, errlen, "TLS handshake timed out", 0);
 	}
 
 	const mbedtls_x509_crt *peer = mbedtls_ssl_get_peer_cert(&ssl);
 	if (!peer)
 		return fail(err, errlen, "Bridge sent no certificate", 0);
 	sha256(peer->raw.p, peer->raw.len, fp);
-
-	fcntl(sock, F_SETFL, fcntl(sock, F_GETFL, 0) | O_NONBLOCK);
-	tls_ready = true;
 	return true;
+}
+
+static void conn_worker(void *arg)
+{
+	(void)arg;
+	bool ok = connect_blocking(conn_host, conn_port, conn_fp, conn_err, sizeof conn_err);
+	conn_result = ok ? 1 : -1;
+}
+
+bool net_connect_begin(const char *host, int port)
+{
+	net_close();
+	strlcpy_utf8(conn_host, host, sizeof conn_host);
+	conn_port = port;
+	conn_cancel = false;
+	conn_result = 0;
+	conn_err[0] = 0;
+
+	s32 prio = 0x30;
+	svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+	// lower priority than the UI; big stack for the TLS handshake
+	conn_thread = threadCreate(conn_worker, NULL, 128 * 1024, prio + 1 > 0x3F ? 0x3F : prio + 1, -2, false);
+	if (!conn_thread) {
+		snprintf(conn_err, sizeof conn_err, "Could not start the network thread");
+		conn_result = -1;
+		return false;
+	}
+	return true;
+}
+
+// true from net_connect_begin until net_connect_poll has collected the result
+bool net_connecting(void) { return conn_thread != NULL; }
+
+int net_connect_poll(unsigned char fp[32], char *err, size_t errlen)
+{
+	if (conn_result == 0)
+		return 0;
+	if (conn_thread) {
+		threadJoin(conn_thread, U64_MAX);
+		threadFree(conn_thread);
+		conn_thread = NULL;
+	}
+	int r = conn_result;
+	conn_result = 0;
+	if (r > 0) {
+		memcpy(fp, conn_fp, 32);
+		tls_ready = true;
+		return 1;
+	}
+	snprintf(err, errlen, "%s", conn_err[0] ? conn_err : "Connection failed");
+	return -1;
 }
 
 // ---------------------------------------------------------------- framing

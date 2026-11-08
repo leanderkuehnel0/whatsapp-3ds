@@ -8,8 +8,6 @@
 #define PING_INTERVAL_MS   30000
 #define RETRY_INTERVAL_MS  5000
 
-static bool need_connect;   // connect on the next frame (so "Connecting..." is drawn first)
-static int  connect_delay;  // frames to wait before connecting
 static u64  retry_at;       // background reconnect time (0 = none)
 static u64  last_ping;
 static bool ever_authed;
@@ -29,8 +27,13 @@ static void start_connect(void)
 	snprintf(g_app.status, sizeof g_app.status, "Connecting to %s:%d...", g_cfg.host, g_cfg.port);
 	if (!ever_authed)
 		g_app.screen = ST_CONNECTING;
-	need_connect = true;
-	connect_delay = 2;
+	retry_at = 0;
+	if (!net_connect_begin(g_cfg.host, g_cfg.port)) {
+		snprintf(g_app.status, sizeof g_app.status, "Could not start connecting.\nRetrying in a few seconds.");
+		if (!ever_authed)
+			g_app.screen = ST_ERROR;
+		retry_at = osGetTime() + RETRY_INTERVAL_MS;
+	}
 }
 
 static void begin_auth(void)
@@ -41,12 +44,10 @@ static void begin_auth(void)
 	snprintf(g_app.status, sizeof g_app.status, "Logging in to the bridge...");
 }
 
-static void do_connect(void)
+// Called once the background connect has finished.
+static void connect_finished(int result, const unsigned char fp[32], const char *err)
 {
-	need_connect = false;
-	char err[128];
-	unsigned char fp[32];
-	if (!net_connect(g_cfg.host, g_cfg.port, fp, err, sizeof err)) {
+	if (result < 0) {
 		snprintf(g_app.status, sizeof g_app.status, "%s\n%s:%d\n\nRetrying in a few seconds.", err, g_cfg.host, g_cfg.port);
 		if (!ever_authed)
 			g_app.screen = ST_ERROR;
@@ -69,8 +70,9 @@ static void do_connect(void)
 
 static void run_setup(void)
 {
-	net_close();
+	net_close(); // also cancels a connect attempt still running
 	client_reset();
+	retry_at = 0;
 	if (config_prompt()) {
 		ever_authed = false;
 		start_connect();
@@ -362,6 +364,8 @@ int main(void)
 				run_setup();
 				continue;
 			}
+			if (net_connecting())
+				break;
 			if (down & KEY_A || (retry_at && osGetTime() >= retry_at && g_cfg.host[0] && g_cfg.token[0] &&
 			                     g_app.status[0] && !strstr(g_app.status, "rejected") && !strstr(g_app.status, "not trusted") &&
 			                     !strstr(g_app.status, "cancelled")))
@@ -385,8 +389,13 @@ int main(void)
 		}
 
 		// networking
-		if (need_connect && --connect_delay <= 0)
-			do_connect();
+		if (net_connecting()) {
+			unsigned char fp[32];
+			char err[128];
+			int r = net_connect_poll(fp, err, sizeof err);
+			if (r != 0)
+				connect_finished(r, fp, err);
+		}
 
 		if (net_connected()) {
 			if (!net_poll(client_on_line, client_on_bin)) {
@@ -409,7 +418,7 @@ int main(void)
 					last_ping = osGetTime();
 				}
 			}
-		} else if (ever_authed && retry_at && osGetTime() >= retry_at && !need_connect) {
+		} else if (ever_authed && retry_at && osGetTime() >= retry_at && !net_connecting()) {
 			start_connect(); // background reconnect, stays on the current screen
 		}
 

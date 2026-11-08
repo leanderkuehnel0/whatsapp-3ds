@@ -36,9 +36,13 @@ typedef void (*BinHandler)(const char *tag, const char *kind, int w, int h, unsi
 
 void net_init(void);
 void net_exit(void);
-// Connects and completes the TLS handshake. fp receives the server certificate's SHA-256.
-bool net_connect(const char *host, int port, unsigned char fp[32], char *err, size_t errlen);
-void net_close(void);
+// Starts connecting (DNS, TCP, TLS handshake) on a background thread.
+bool net_connect_begin(const char *host, int port);
+bool net_connecting(void);
+// Checks the background connect: 0 still running, 1 connected (fp = server certificate SHA-256),
+// -1 failed (err filled in). Call every frame while net_connecting().
+int  net_connect_poll(unsigned char fp[32], char *err, size_t errlen);
+void net_close(void); // also cancels a connect in progress
 bool net_connected(void);
 // Sends one line made of fields (escaped here). Returns false if the connection broke.
 bool net_send(const char **fields, int nfields);
