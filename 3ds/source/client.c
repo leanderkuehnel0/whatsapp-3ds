@@ -6,7 +6,7 @@
 #include <string.h>
 #include <time.h>
 
-typedef enum { RQ_NONE, RQ_AUTH, RQ_CHATS, RQ_MSGS, RQ_OLDER, RQ_SEND, RQ_READ, RQ_MEDIA, RQ_PING } ReqType;
+typedef enum { RQ_NONE, RQ_AUTH, RQ_CHATS, RQ_MSGS, RQ_OLDER, RQ_SEND, RQ_READ, RQ_MEDIA, RQ_PING, RQ_CALL, RQ_CALLCTL } ReqType;
 
 typedef struct {
 	int     tag;
@@ -156,6 +156,152 @@ void client_request_image(const Msg *m)
 	}
 }
 
+// ---------------------------------------------------------------- calls
+
+// After a reconnect the bridge re-sends CALLSTATE for a call that is still going.
+// If none arrives shortly, the call ended while we were offline.
+static u64 call_check_until;
+
+static void call_enter_screen(void)
+{
+	if (g_app.screen != ST_CALL) {
+		g_app.call_prev_screen = g_app.screen == ST_IMAGE ? ST_CHAT : g_app.screen;
+		g_app.screen = ST_CALL;
+	}
+}
+
+static void call_set_state(CallState cs)
+{
+	CallState prev = g_app.call_state;
+	g_app.call_state = cs;
+	switch (cs) {
+	case CALL_RINGING:
+		audio_ring(2);
+		break;
+	case CALL_INCOMING:
+		audio_ring(1);
+		break;
+	case CALL_CONNECTING:
+		audio_ring(0);
+		break;
+	case CALL_ACTIVE:
+		if (prev != CALL_ACTIVE) {
+			g_app.call_started = osGetTime();
+			if (!audio_call_begin())
+				ui_show_toast("Microphone unavailable - the other side won't hear you", 6);
+		}
+		break;
+	case CALL_ENDED:
+	case CALL_NONE:
+		audio_call_end();
+		g_app.call_ended_at = osGetTime();
+		break;
+	}
+}
+
+void client_call_start(const char *jid)
+{
+	if (g_app.call_state != CALL_NONE && g_app.call_state != CALL_ENDED)
+		return;
+	if (!audio_available())
+		ui_show_toast("No sound: dump the DSP firmware with DSP1 first", 6);
+	Chat *c = chat_find(jid);
+	g_app.call_id[0] = 0;
+	strlcpy_utf8(g_app.call_jid, jid, sizeof g_app.call_jid);
+	strlcpy_utf8(g_app.call_name, c ? c->name : jid, sizeof g_app.call_name);
+	g_app.call_incoming = false;
+	g_app.call_muted = false;
+	g_app.call_end_reason[0] = 0;
+	call_enter_screen();
+	call_set_state(CALL_RINGING);
+	const char *a[] = {"CALL", jid};
+	if (!request(RQ_CALL, jid, NULL, a, 2)) {
+		strcpy(g_app.call_end_reason, "not connected");
+		call_set_state(CALL_ENDED);
+	}
+}
+
+void client_call_accept(void)
+{
+	if (g_app.call_state != CALL_INCOMING || !g_app.call_id[0])
+		return;
+	const char *a[] = {"ACCEPT", g_app.call_id};
+	request(RQ_CALLCTL, NULL, NULL, a, 2);
+	call_set_state(CALL_CONNECTING);
+}
+
+void client_call_hangup(void)
+{
+	if (g_app.call_id[0]) {
+		const char *a[] = {"HANGUP", g_app.call_id};
+		request(RQ_CALLCTL, NULL, NULL, a, 2);
+	}
+	call_set_state(CALL_ENDED);
+}
+
+// * CALLSTATE <id> <chat> <name> <state> <in/out> <reason>
+static void on_call_state(char **f, int n)
+{
+	if (n < 6)
+		return;
+	const char *id = f[0], *st = f[3];
+	bool busy = g_app.call_state != CALL_NONE && g_app.call_state != CALL_ENDED;
+	if (busy && g_app.call_id[0] && strcmp(g_app.call_id, id) != 0)
+		return; // some other call; the bridge only handles one at a time anyway
+	call_check_until = 0;
+
+	CallState cs = CALL_ENDED;
+	if (!strcmp(st, "ringing"))
+		cs = CALL_RINGING;
+	else if (!strcmp(st, "incoming"))
+		cs = CALL_INCOMING;
+	else if (!strcmp(st, "connecting"))
+		cs = CALL_CONNECTING;
+	else if (!strcmp(st, "active"))
+		cs = CALL_ACTIVE;
+
+	if (cs == CALL_ENDED && g_app.screen != ST_CALL) {
+		g_app.call_state = CALL_NONE;
+		return;
+	}
+	if (!busy) {
+		g_app.call_muted = false;
+		g_app.call_end_reason[0] = 0;
+	}
+	strlcpy_utf8(g_app.call_id, id, sizeof g_app.call_id);
+	strlcpy_utf8(g_app.call_jid, f[1], sizeof g_app.call_jid);
+	Chat *c = chat_find(f[1]);
+	strlcpy_utf8(g_app.call_name, c ? c->name : f[2], sizeof g_app.call_name);
+	g_app.call_incoming = !strcmp(f[4], "in");
+	strlcpy_utf8(g_app.call_end_reason, f[5], sizeof g_app.call_end_reason);
+	if (cs != CALL_ENDED)
+		call_enter_screen();
+	if (cs != g_app.call_state)
+		call_set_state(cs);
+}
+
+void client_tick(void)
+{
+	if (call_check_until && osGetTime() > call_check_until) {
+		call_check_until = 0;
+		if (g_app.call_state != CALL_NONE && g_app.call_state != CALL_ENDED) {
+			strcpy(g_app.call_end_reason, "connection lost");
+			call_set_state(CALL_ENDED);
+		}
+	}
+	// leave the call screen a moment after the call is over
+	if (g_app.screen == ST_CALL && (g_app.call_state == CALL_ENDED || g_app.call_state == CALL_NONE) &&
+	    osGetTime() - g_app.call_ended_at > 2500) {
+		g_app.screen = g_app.call_prev_screen;
+		if (g_app.screen == ST_CALL || g_app.screen == ST_IMAGE)
+			g_app.screen = ST_CHATS;
+		if (g_app.screen == ST_CHAT && !g_app.cur_jid[0])
+			g_app.screen = ST_CHATS;
+		g_app.call_state = CALL_NONE;
+		g_app.call_id[0] = 0;
+	}
+}
+
 // ---------------------------------------------------------------- parsing
 
 // <chat> = jid name is_group last_ts unread preview
@@ -290,10 +436,8 @@ static void on_event(char **f, int n)
 		g_app.wa_online = !strcmp(f[2], "connected");
 		if (!strcmp(f[2], "logged_out"))
 			ui_show_toast("WhatsApp logged this bridge out. Re-link it on the server.", 10);
-	} else if (!strcmp(ev, "CALL") && n >= 4) {
-		char t[160];
-		snprintf(t, sizeof t, "Incoming call from %s (answer on your phone)", f[3]);
-		ui_show_toast(t, 10);
+	} else if (!strcmp(ev, "CALLSTATE")) {
+		on_call_state(f + 2, n - 2);
 	}
 }
 
@@ -326,6 +470,8 @@ void client_on_line(char **f, int n)
 			if (g_app.screen == ST_CONNECTING || g_app.screen == ST_ERROR || g_app.screen == ST_TRUST)
 				g_app.screen = ST_CHATS;
 			client_request_chats();
+			if (g_app.call_state != CALL_NONE && g_app.call_state != CALL_ENDED)
+				call_check_until = osGetTime() + 3000;
 			if (g_app.screen == ST_CHAT && g_app.cur_jid[0]) {
 				// reconnected while a conversation was open: reload it
 				Chat c = {0};
@@ -420,6 +566,24 @@ void client_on_line(char **f, int n)
 		}
 		break;
 
+	case RQ_CALL:
+		if (!strcmp(kind, "OK") && n >= 3) {
+			if (!g_app.call_id[0])
+				strlcpy_utf8(g_app.call_id, f[2], sizeof g_app.call_id);
+		} else if (!strcmp(kind, "ERR")) {
+			snprintf(g_app.call_end_reason, sizeof g_app.call_end_reason, "%s", n >= 3 ? f[2] : "failed");
+			if (g_app.screen == ST_CALL)
+				call_set_state(CALL_ENDED);
+		}
+		break;
+
+	case RQ_CALLCTL:
+		if (!strcmp(kind, "ERR") && g_app.screen == ST_CALL) {
+			snprintf(g_app.call_end_reason, sizeof g_app.call_end_reason, "%s", n >= 3 ? f[2] : "failed");
+			call_set_state(CALL_ENDED);
+		}
+		break;
+
 	case RQ_MEDIA:
 		if (!strcmp(kind, "ERR")) {
 			g_app.img_loading = false;
@@ -435,10 +599,15 @@ void client_on_line(char **f, int n)
 		p->type = RQ_NONE;
 }
 
-void client_on_bin(const char *tag, int w, int h, unsigned char *data, size_t len)
+void client_on_bin(const char *tag, const char *kind, int w, int h, unsigned char *data, size_t len)
 {
 	(void)w;
 	(void)h;
+	if (!strcmp(kind, "AUD")) {
+		audio_play_frame(data, len);
+		free(data);
+		return;
+	}
 	Pending *p = pending_get(tag);
 	if (p && p->type == RQ_MEDIA) {
 		p->type = RQ_NONE;

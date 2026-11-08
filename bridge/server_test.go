@@ -39,6 +39,7 @@ func newTestServer(t *testing.T) (addr string, b *Bridge, token string) {
 	}
 	client := whatsmeow.NewClient(dev, nil)
 	b = &Bridge{wa: client, store: st, hub: NewHub(), media: &MediaCache{dir: filepath.Join(dir, "media"), wa: client}}
+	b.calls = NewCallHub(b, false)
 
 	cert, err := loadOrCreateCert(dir)
 	if err != nil {
@@ -101,7 +102,7 @@ func (tc *testClient) recvUntil(tag, kind string) (got [][]string) {
 		if f[0] == tag && f[1] == kind {
 			return got
 		}
-		if f[0] == tag && f[1] == "ERR" {
+		if f[0] == tag && f[1] == "ERR" && kind != "ERR" {
 			tc.t.Fatalf("unexpected error: %q", f)
 		}
 	}
@@ -217,5 +218,39 @@ func TestChatsMessagesAndEvents(t *testing.T) {
 func TestDescribe(t *testing.T) {
 	if kind, _, _, ok := describe(nil); ok || kind != "" {
 		t.Fatal("nil message should be skipped")
+	}
+}
+
+func TestCallCommandsAndAudioFraming(t *testing.T) {
+	addr, _, token := newTestServer(t)
+	c := dial(t, addr)
+	c.send("1", "AUTH", token)
+	c.recvUntil("1", "OK")
+
+	c.send("2", "CALL", "123456789@g.us")
+	if f := c.recvUntil("2", "ERR"); !strings.Contains(f[len(f)-1][2], "group") {
+		t.Fatalf("group call: %q", f)
+	}
+	c.send("3", "HANGUP", "NOSUCHCALL")
+	if f := c.recvUntil("3", "ERR"); len(f) != 1 {
+		t.Fatalf("hangup: %q", f)
+	}
+
+	// a microphone frame with no call running is ignored, and the stream stays in sync
+	var st adpcmState
+	frame := adpcmEncode(&st, make([]int16, callFrameSamples))
+	if _, err := c.c.Write(append([]byte(line("a", "AUD", "164")+"\n"), frame...)); err != nil {
+		t.Fatal(err)
+	}
+	c.send("4", "PING")
+	c.recvUntil("4", "OK")
+
+	// an absurd audio length closes the connection
+	c.send("a", "AUD", "999999")
+	_ = c.c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for {
+		if _, err := c.r.ReadString('\n'); err != nil {
+			break
+		}
 	}
 }

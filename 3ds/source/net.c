@@ -40,6 +40,7 @@ static size_t rx_len, rx_cap;
 static unsigned char *bin;
 static size_t bin_len, bin_got;
 static char   bin_tag[16];
+static char   bin_kind[8];
 static int    bin_w, bin_h;
 
 void net_init(void)
@@ -291,11 +292,12 @@ static void dispatch_line(char *l, LineHandler on_line)
 	for (int i = 0; i < n; i++)
 		unescape(f[i]);
 
-	if (n >= 3 && strcmp(f[1], "BIN") == 0) {
+	if (n >= 3 && (strcmp(f[1], "BIN") == 0 || strcmp(f[1], "AUD") == 0)) {
 		bin_len = strtoul(f[2], NULL, 10);
 		bin_w = n > 3 ? atoi(f[3]) : 0;
 		bin_h = n > 4 ? atoi(f[4]) : 0;
 		strlcpy_utf8(bin_tag, f[0], sizeof bin_tag);
+		strlcpy_utf8(bin_kind, f[1], sizeof bin_kind);
 		bin_got = 0;
 		bin = malloc(bin_len ? bin_len : 1);
 		return;
@@ -318,7 +320,9 @@ static void process_rx(LineHandler on_line, BinHandler on_bin)
 			if (bin_got == bin_len) {
 				unsigned char *data = bin;
 				bin = NULL;
-				on_bin(bin_tag, bin_w, bin_h, data, bin_len);
+				on_bin(bin_tag, bin_kind, bin_w, bin_h, data, bin_len);
+				if (!tls_ready)
+					return;
 			}
 			continue;
 		}
@@ -361,9 +365,25 @@ bool net_poll(LineHandler on_line, BinHandler on_bin)
 	return true;
 }
 
+bool net_send_binary(const char *tag, const char *kind, const unsigned char *data, size_t len)
+{
+	if (!tls_ready)
+		return false;
+	unsigned char buf[64 + 1024];
+	if (len > 1024)
+		return false;
+	int h = snprintf((char *)buf, 64, "%s\t%s\t%u\n", tag, kind, (unsigned)len);
+	memcpy(buf + h, data, len);
+	bool ok = write_all(buf, h + len);
+	if (!ok)
+		net_close();
+	return ok;
+}
+
 size_t net_bin_progress(size_t *total)
 {
+	bool img = bin && strcmp(bin_kind, "BIN") == 0;
 	if (total)
-		*total = bin ? bin_len : 0;
-	return bin ? bin_got : 0;
+		*total = img ? bin_len : 0;
+	return img ? bin_got : 0;
 }

@@ -111,6 +111,7 @@ func run(listen, dataDir, pairPhone string, debug bool) error {
 		hub:   hub,
 		media: &MediaCache{dir: filepath.Join(dataDir, "media"), wa: client},
 	}
+	bridge.calls = NewCallHub(bridge, debug)
 	client.AddEventHandler(bridge.handleEvent)
 
 	if err := connectWhatsApp(ctx, client, pairPhone); err != nil {
@@ -230,4 +231,3 @@ func portOf(addr string) string {
 	}
 	return addr
 }
-

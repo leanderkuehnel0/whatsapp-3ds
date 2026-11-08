@@ -16,7 +16,7 @@ The two talk over a TLS connection protected by a token. The console pins the br
 - Viewing photos, stickers and video thumbnails, which the bridge shrinks to fit the screen
 - Read receipts, unread counters, edits and deletions
 - Recent chat history synced when you first link
-- A notice when someone calls you (calls themselves aren't supported yet)
+- 1:1 voice calls, incoming and outgoing, using the console's microphone and speaker. Calling uses [WaCalls](https://github.com/JotaDev66/WaCalls)' VoIP stack (MIT), copied into `bridge/internal/voip`.
 
 ## Downloads
 
@@ -72,6 +72,8 @@ The token is stored in `/var/lib/wa3ds/token`. To change it, edit that file (or 
 3. Enter the bridge address (domain or IP), the port (7473) and the token.
 4. On first connect, the app shows the bridge's certificate fingerprint. Check that it matches the one the bridge printed, then press **A**.
 
+Calls need the DSP firmware for sound. If you've never run **DSP1** on your console, run it once; it saves `sd:/3ds/dspfirm.cdc`. Use headphones during calls, because the 3DS speaker and microphone are close together and cause echo.
+
 The settings are saved in `sd:/3ds/wa3ds/config.ini`. You can also edit them there, or press **SELECT** on the chat list.
 
 ### Controls
@@ -86,9 +88,12 @@ The settings are saved in `sd:/3ds/wa3ds/config.ini`. You can also edit them the
 | | Circle Pad | Scroll |
 | | A | Write a message |
 | | Y | View the selected photo |
+| | X | Voice call (1:1 chats) |
 | | L | Load older messages |
 | | B | Back |
-| Anywhere | START | Quit |
+| Call | A / B | Accept / decline an incoming call, B hangs up |
+| | X | Mute or unmute the microphone |
+| Anywhere | START | Quit (hangs up first if you're in a call) |
 
 ## Building locally
 

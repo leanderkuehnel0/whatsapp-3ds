@@ -485,19 +485,26 @@ static void draw_bot_chats(void)
 	header(title, BOT_W, BOT_HEADER_H, NULL);
 }
 
-static const char *btn_labels[4] = {"Write  (A)", "View image  (Y)", "Older  (L)", "Back  (B)"};
+static const char *btn_labels[5] = {"Write (A)", "Image (Y)", "Call (X)", "Older (L)", "Back (B)"};
 
+// top row: write, image, call; bottom row: older, back
 static void btn_rect(int i, float *x, float *y, float *w, float *h)
 {
-	*w = 148;
 	*h = 60;
-	*x = (i % 2) ? 164 : 8;
-	*y = (i / 2) ? 170 : 104;
+	if (i < 3) {
+		*w = 98;
+		*x = 8 + i * 103;
+		*y = 104;
+	} else {
+		*w = 150;
+		*x = 8 + (i - 3) * 154;
+		*y = 170;
+	}
 }
 
 int ui_chat_button_at(int x, int y)
 {
-	for (int i = 0; i < 4; i++) {
+	for (int i = 0; i < 5; i++) {
 		float bx, by, bw, bh;
 		btn_rect(i, &bx, &by, &bw, &bh);
 		if (x >= bx && x < bx + bw && y >= by && y < by + bh)
@@ -531,11 +538,15 @@ static void draw_bot_chat(void)
 	}
 	text("D-Pad: select   Circle Pad: scroll", BOT_W / 2, 78, 0.4f, COL_MUTED, C2D_AlignCenter);
 
-	for (int i = 0; i < 4; i++) {
+	for (int i = 0; i < 5; i++) {
 		float x, y, w, h;
 		btn_rect(i, &x, &y, &w, &h);
-		bool enabled = i != 1 || selected_has_media();
-		if (i == 2 && g_app.no_older)
+		bool enabled = true;
+		if (i == 1)
+			enabled = selected_has_media();
+		if (i == 2)
+			enabled = !g_app.cur_group;
+		if (i == 3 && g_app.no_older)
 			enabled = false;
 		rect(x, y, w, h, enabled ? COL_BTN : COL_BTN_OFF);
 		rect(x, y + h - 3, w, 3, enabled ? COL_ACCENT : COL_LINE);
@@ -564,6 +575,139 @@ static void draw_bot_hints(void)
 	text(h, BOT_W / 2, 90, 0.5f, COL_TEXT, C2D_AlignCenter);
 }
 
+// ---------------------------------------------------------------- call screen
+
+#define COL_CALL_BG  C2D_Color32(0x0B, 0x14, 0x1A, 0xFF)
+#define COL_RED      C2D_Color32(0xE5, 0x39, 0x35, 0xFF)
+
+static void call_status(char *out, size_t n)
+{
+	switch (g_app.call_state) {
+	case CALL_RINGING:
+		snprintf(out, n, "Calling...");
+		break;
+	case CALL_INCOMING:
+		snprintf(out, n, "Incoming voice call");
+		break;
+	case CALL_CONNECTING:
+		snprintf(out, n, "Connecting...");
+		break;
+	case CALL_ACTIVE: {
+		u64 s = (osGetTime() - g_app.call_started) / 1000;
+		snprintf(out, n, "%02u:%02u%s", (unsigned)(s / 60), (unsigned)(s % 60), g_app.call_muted ? "  (muted)" : "");
+		break;
+	}
+	default: {
+		const char *r = g_app.call_end_reason;
+		if (!strcmp(r, "declined") || !strcmp(r, "busy"))
+			snprintf(out, n, "Call declined");
+		else if (!strcmp(r, "timeout"))
+			snprintf(out, n, "No answer");
+		else if (r[0] && strcmp(r, "user_ended") && strcmp(r, "unknown"))
+			snprintf(out, n, "Call ended (%s)", r);
+		else
+			snprintf(out, n, "Call ended");
+	}
+	}
+}
+
+static void draw_top_call(void)
+{
+	C2D_TargetClear(top, COL_CALL_BG);
+	C2D_SceneBegin(top);
+	C2D_TextBufClear(tbuf);
+
+	// avatar circle with initial
+	C2D_DrawCircleSolid(TOP_W / 2, 70, 0.5f, 34, COL_HEADER);
+	char initial[8] = "?";
+	if (g_app.call_name[0]) {
+		u32 cp;
+		int len = next_cp(g_app.call_name, &cp);
+		memcpy(initial, g_app.call_name, len);
+		initial[len] = 0;
+	}
+	text(initial, TOP_W / 2, 52, 1.0f, COL_WHITE, C2D_AlignCenter);
+
+	char name[128];
+	ellipsize(g_app.call_name, TOP_W - 40, 0.75f, name, sizeof name);
+	text(name, TOP_W / 2, 116, 0.75f, COL_WHITE, C2D_AlignCenter);
+	char st[64];
+	call_status(st, sizeof st);
+	text(st, TOP_W / 2, 146, 0.55f, C2D_Color32(0xB0, 0xBE, 0xC5, 0xFF), C2D_AlignCenter);
+
+	if (g_app.call_state == CALL_ACTIVE) {
+		// microphone level meter
+		float l = audio_mic_level();
+		if (l > 1)
+			l = 1;
+		rect(120, 180, 160, 6, C2D_Color32(0x26, 0x32, 0x38, 0xFF));
+		rect(120, 180, 160 * (g_app.call_muted ? 0 : l), 6, COL_ACCENT);
+		text(g_app.call_muted ? "Microphone muted" : "Microphone", TOP_W / 2, 190, 0.4f, COL_MUTED, C2D_AlignCenter);
+	}
+	if (!audio_available())
+		text("No sound: dump the DSP firmware with DSP1", TOP_W / 2, 212, 0.42f, COL_RED, C2D_AlignCenter);
+	else if (g_app.call_state == CALL_ACTIVE || g_app.call_state == CALL_CONNECTING)
+		text("Tip: use headphones to avoid echo", TOP_W / 2, 214, 0.4f, COL_MUTED, C2D_AlignCenter);
+	draw_toast();
+}
+
+static void call_btn_rect(int i, float *x, float *y, float *w, float *h)
+{
+	*x = i ? 166 : 10;
+	*y = 110;
+	*w = 144;
+	*h = 110;
+}
+
+int ui_call_button_at(int x, int y)
+{
+	for (int i = 0; i < 2; i++) {
+		float bx, by, bw, bh;
+		call_btn_rect(i, &bx, &by, &bw, &bh);
+		if (x >= bx && x < bx + bw && y >= by && y < by + bh)
+			return i;
+	}
+	return -1;
+}
+
+static void draw_bot_call(void)
+{
+	C2D_TargetClear(bot, COL_CALL_BG);
+	C2D_SceneBegin(bot);
+	C2D_TextBufClear(tbuf);
+
+	const char *l = NULL, *r = NULL;
+	u32 lc = C2D_Color32(0x37, 0x47, 0x4F, 0xFF), rc = COL_RED;
+	switch (g_app.call_state) {
+	case CALL_INCOMING:
+		l = "Decline (B)";
+		lc = COL_RED;
+		r = "Accept (A)";
+		rc = COL_ACCENT;
+		break;
+	case CALL_RINGING:
+	case CALL_CONNECTING:
+		r = "Hang up (B)";
+		break;
+	case CALL_ACTIVE:
+		l = g_app.call_muted ? "Unmute (X)" : "Mute (X)";
+		r = "Hang up (B)";
+		break;
+	default:
+		break;
+	}
+	text("Voice call", BOT_W / 2, 40, 0.55f, COL_WHITE, C2D_AlignCenter);
+	for (int i = 0; i < 2; i++) {
+		const char *label = i ? r : l;
+		if (!label)
+			continue;
+		float x, y, w, h;
+		call_btn_rect(i, &x, &y, &w, &h);
+		rect(x, y, w, h, i ? rc : lc);
+		text(label, x + w / 2, y + h / 2 - 10, 0.6f, COL_WHITE, C2D_AlignCenter);
+	}
+}
+
 void ui_render(void)
 {
 	C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
@@ -579,6 +723,10 @@ void ui_render(void)
 	case ST_IMAGE:
 		draw_top_image();
 		draw_bot_image();
+		break;
+	case ST_CALL:
+		draw_top_call();
+		draw_bot_call();
 		break;
 	default:
 		draw_top_message_screen();

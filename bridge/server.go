@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"strconv"
@@ -24,56 +25,164 @@ func NewHub() *Hub { return &Hub{clients: map[*Conn]struct{}{}} }
 func (h *Hub) add(c *Conn)    { h.mu.Lock(); h.clients[c] = struct{}{}; h.mu.Unlock() }
 func (h *Hub) remove(c *Conn) { h.mu.Lock(); delete(h.clients, c); h.mu.Unlock() }
 
-func (h *Hub) Broadcast(l string) {
+func (h *Hub) snapshot() []*Conn {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	conns := make([]*Conn, 0, len(h.clients))
 	for c := range h.clients {
 		conns = append(conns, c)
 	}
-	h.mu.Unlock()
-	for _, c := range conns {
-		if err := c.writeLines(l); err != nil {
-			c.close()
-		}
+	return conns
+}
+
+// Broadcast queues an event line for every client. It never blocks on a slow client.
+func (h *Hub) Broadcast(l string) {
+	for _, c := range h.snapshot() {
+		c.enqueue([]byte(l+"\n"), false)
 	}
 }
 
-// Conn is one connected 3DS.
+// BroadcastAudio queues one call audio frame for every client, dropping it for clients that lag behind.
+func (h *Hub) BroadcastAudio(frame []byte) {
+	if len(h.snapshot()) == 0 {
+		return
+	}
+	msg := append([]byte(line("*", "AUD", strconv.Itoa(len(frame)))+"\n"), frame...)
+	for _, c := range h.snapshot() {
+		c.enqueue(msg, true)
+	}
+}
+
+// Conn is one connected 3DS. All writes go through a queue drained by one writer goroutine,
+// so call audio and events are never held up by a slow connection.
 type Conn struct {
 	nc   net.Conn
-	wmu  sync.Mutex
-	w    *bufio.Writer
+	out  chan []byte
+	done chan struct{}
 	once sync.Once
 }
 
-const writeTimeout = 30 * time.Second
+const (
+	writeTimeout = 30 * time.Second
+	queueLen     = 512
+)
 
-func (c *Conn) writeLines(lines ...string) error {
-	c.wmu.Lock()
-	defer c.wmu.Unlock()
-	_ = c.nc.SetWriteDeadline(time.Now().Add(writeTimeout))
-	for _, l := range lines {
-		if _, err := c.w.WriteString(l + "\n"); err != nil {
-			return err
+func newConn(nc net.Conn) *Conn {
+	c := &Conn{nc: nc, out: make(chan []byte, queueLen), done: make(chan struct{})}
+	go c.writer()
+	return c
+}
+
+func (c *Conn) writer() {
+	w := bufio.NewWriterSize(c.nc, 32*1024)
+	for {
+		select {
+		case <-c.done:
+			return
+		case msg := <-c.out:
+			if msg == nil { // shutdown marker: everything before it has been written
+				_ = w.Flush()
+				c.close()
+				return
+			}
+			_ = c.nc.SetWriteDeadline(time.Now().Add(writeTimeout + time.Duration(len(msg)/4096)*time.Second))
+			if _, err := w.Write(msg); err != nil {
+				c.close()
+				return
+			}
+			// batch whatever else is already queued into the same flush
+			for drained := false; !drained; {
+				select {
+				case more := <-c.out:
+					if more == nil {
+						_ = w.Flush()
+						c.close()
+						return
+					}
+					if _, err := w.Write(more); err != nil {
+						c.close()
+						return
+					}
+				default:
+					drained = true
+				}
+			}
+			if err := w.Flush(); err != nil {
+				c.close()
+				return
+			}
 		}
 	}
-	return c.w.Flush()
+}
+
+// enqueue hands a message to the writer. Droppable messages (audio) are discarded when the
+// queue is full; others wait briefly and then give up on the connection.
+func (c *Conn) enqueue(msg []byte, droppable bool) bool {
+	select {
+	case <-c.done:
+		return false
+	default:
+	}
+	if droppable {
+		select {
+		case c.out <- msg:
+			return true
+		default:
+			return false
+		}
+	}
+	select {
+	case c.out <- msg:
+		return true
+	case <-c.done:
+		return false
+	case <-time.After(10 * time.Second):
+		c.close()
+		return false
+	}
+}
+
+func (c *Conn) writeLines(lines ...string) error {
+	var b []byte
+	for _, l := range lines {
+		b = append(b, l...)
+		b = append(b, '\n')
+	}
+	if !c.enqueue(b, false) {
+		return fmt.Errorf("connection closed")
+	}
+	return nil
 }
 
 func (c *Conn) writeBinary(header string, data []byte) error {
-	c.wmu.Lock()
-	defer c.wmu.Unlock()
-	_ = c.nc.SetWriteDeadline(time.Now().Add(writeTimeout + time.Duration(len(data)/4096)*time.Second))
-	if _, err := c.w.WriteString(header + "\n"); err != nil {
-		return err
+	msg := make([]byte, 0, len(header)+1+len(data))
+	msg = append(append(append(msg, header...), '\n'), data...)
+	if !c.enqueue(msg, false) {
+		return fmt.Errorf("connection closed")
 	}
-	if _, err := c.w.Write(data); err != nil {
-		return err
-	}
-	return c.w.Flush()
+	return nil
 }
 
-func (c *Conn) close() { c.once.Do(func() { _ = c.nc.Close() }) }
+// shutdown sends whatever is queued, then closes the connection.
+func (c *Conn) shutdown() {
+	select {
+	case c.out <- nil:
+		select {
+		case <-c.done:
+		case <-time.After(5 * time.Second):
+		}
+	case <-c.done:
+	case <-time.After(time.Second):
+	}
+	c.close()
+}
+
+func (c *Conn) close() {
+	c.once.Do(func() {
+		close(c.done)
+		_ = c.nc.Close()
+	})
+}
 
 // Server accepts TLS connections from 3DS clients and answers protocol requests (see PROTOCOL.md).
 type Server struct {
@@ -83,9 +192,17 @@ type Server struct {
 }
 
 const (
-	idleTimeout = 3 * time.Minute // client pings every 30 s
-	maxLineLen  = 64 * 1024
+	idleTimeout   = 3 * time.Minute // client pings every 30 s
+	maxLineLen    = 64 * 1024
+	maxAudioFrame = 4096
 )
+
+func firstArg(a []string) string {
+	if len(a) == 0 {
+		return ""
+	}
+	return a[0]
+}
 
 func (s *Server) Serve(ln net.Listener) error {
 	tl := tls.NewListener(ln, s.tlsCfg)
@@ -99,8 +216,8 @@ func (s *Server) Serve(ln net.Listener) error {
 }
 
 func (s *Server) handle(nc net.Conn) {
-	c := &Conn{nc: nc, w: bufio.NewWriter(nc)}
-	defer c.close()
+	c := newConn(nc)
+	defer c.shutdown()
 	remote := nc.RemoteAddr().String()
 
 	r := bufio.NewReaderSize(nc, 4096)
@@ -124,6 +241,20 @@ func (s *Server) handle(nc net.Conn) {
 		}
 		tag, cmd, args := f[0], f[1], f[2:]
 
+		if cmd == "AUD" && authed {
+			// microphone frame: "<tag> AUD <len>" followed by len bytes, no reply
+			n, err := strconv.Atoi(firstArg(args))
+			if err != nil || n <= 0 || n > maxAudioFrame {
+				return
+			}
+			frame := make([]byte, n)
+			if _, err := io.ReadFull(r, frame); err != nil {
+				return
+			}
+			s.bridge.calls.FeedMicAudio(frame)
+			continue
+		}
+
 		if !authed {
 			if cmd != "AUTH" || len(args) < 1 || subtle.ConstantTimeCompare([]byte(args[0]), []byte(s.token)) != 1 {
 				log.Printf("rejected client %s: bad or missing token", remote)
@@ -143,6 +274,9 @@ func (s *Server) handle(nc net.Conn) {
 				state = "connected"
 			}
 			_ = c.writeLines(line("*", "STATUS", state))
+			if l, ok := s.bridge.calls.StateLine(); ok {
+				_ = c.writeLines(l)
+			}
 			continue
 		}
 
@@ -242,6 +376,31 @@ func (s *Server) dispatch(c *Conn, tag, cmd string, args []string) error {
 			return errLine(err)
 		}
 		return c.writeBinary(line(tag, "BIN", strconv.Itoa(len(img.JPEG)), strconv.Itoa(img.W), strconv.Itoa(img.H)), img.JPEG)
+
+	case "CALL":
+		if len(args) < 1 {
+			return errLine(fmt.Errorf("usage: CALL jid"))
+		}
+		id, err := b.calls.Start(ctx, args[0])
+		if err != nil {
+			return errLine(err)
+		}
+		return c.writeLines(line(tag, "OK", id))
+
+	case "ACCEPT", "HANGUP":
+		if len(args) < 1 {
+			return errLine(fmt.Errorf("usage: %s call_id", cmd))
+		}
+		var err error
+		if cmd == "ACCEPT" {
+			err = b.calls.Accept(ctx, args[0])
+		} else {
+			err = b.calls.Hangup(ctx, args[0])
+		}
+		if err != nil {
+			return errLine(err)
+		}
+		return c.writeLines(line(tag, "OK"))
 	}
 	return errLine(fmt.Errorf("unknown command %q", cmd))
 }

@@ -14,3 +14,5 @@ bridge/dist/
 .env
 
 .DS_Store
+bridge/wa3ds-data/
+wa3ds-data/

@@ -23,9 +23,15 @@ type Bridge struct {
 	store *Store
 	hub   *Hub
 	media *MediaCache
+	calls *CallHub
 }
 
 func (b *Bridge) handleEvent(rawEvt any) {
+	// Call signaling must not wait behind slow work like history sync.
+	if isCallEvent(rawEvt) {
+		go b.calls.HandleEvent(context.Background(), rawEvt)
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -52,11 +58,8 @@ func (b *Bridge) handleEvent(rawEvt any) {
 		if evt.Action.GetRead() {
 			b.setUnread(ctx, b.normalizeChat(ctx, evt.JID).String(), 0)
 		}
-	case *events.CallOffer:
-		from := b.normalizeChat(ctx, evt.From)
-		name := b.contactName(ctx, from)
-		log.Printf("Incoming call from %s", name)
-		b.hub.Broadcast(line("*", "CALL", from.String(), name, fmt.Sprint(evt.Timestamp.Unix())))
+	default:
+		b.calls.HandleEvent(ctx, rawEvt)
 	}
 }
 
@@ -431,4 +434,12 @@ func (b *Bridge) OwnInfo() (name, jid string) {
 		jid = b.wa.Store.ID.ToNonAD().String()
 	}
 	return b.wa.Store.PushName, jid
+}
+
+func isCallEvent(evt any) bool {
+	switch evt.(type) {
+	case *events.CallOffer, *events.CallAccept, *events.CallTransport, *events.CallTerminate, *events.CallReject:
+		return true
+	}
+	return false
 }

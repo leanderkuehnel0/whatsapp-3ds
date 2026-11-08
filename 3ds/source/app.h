@@ -31,7 +31,8 @@ bool config_prompt(void);
 // Called for each received protocol line, already split into unescaped fields.
 typedef void (*LineHandler)(char **fields, int nfields);
 // Called when a BIN payload has been fully received. The handler takes ownership of data.
-typedef void (*BinHandler)(const char *tag, int w, int h, unsigned char *data, size_t len);
+// kind is "BIN" (image) or "AUD" (call audio).
+typedef void (*BinHandler)(const char *tag, const char *kind, int w, int h, unsigned char *data, size_t len);
 
 void net_init(void);
 void net_exit(void);
@@ -41,6 +42,8 @@ void net_close(void);
 bool net_connected(void);
 // Sends one line made of fields (escaped here). Returns false if the connection broke.
 bool net_send(const char **fields, int nfields);
+// Sends "<tag> <kind> <len>" followed by raw bytes (max 1024).
+bool net_send_binary(const char *tag, const char *kind, const unsigned char *data, size_t len);
 // Reads whatever has arrived and dispatches complete lines. Returns false if the connection broke.
 bool net_poll(LineHandler on_line, BinHandler on_bin);
 // Bytes received so far of a pending BIN payload (for progress display).
@@ -73,7 +76,9 @@ typedef struct {
 	float y, h;     // layout within the conversation
 } Msg;
 
-typedef enum { ST_SETUP, ST_CONNECTING, ST_TRUST, ST_ERROR, ST_CHATS, ST_CHAT, ST_IMAGE } Screen;
+typedef enum { ST_SETUP, ST_CONNECTING, ST_TRUST, ST_ERROR, ST_CHATS, ST_CHAT, ST_IMAGE, ST_CALL } Screen;
+
+typedef enum { CALL_NONE, CALL_RINGING, CALL_INCOMING, CALL_CONNECTING, CALL_ACTIVE, CALL_ENDED } CallState;
 
 typedef struct {
 	Screen screen;
@@ -111,6 +116,18 @@ typedef struct {
 
 	char   toast[200];
 	u64    toast_until;
+
+	// voice call
+	CallState call_state;
+	char   call_id[48];
+	char   call_jid[72];
+	char   call_name[96];
+	bool   call_incoming;
+	bool   call_muted;
+	u64    call_started;   // when it became active
+	u64    call_ended_at;
+	char   call_end_reason[32];
+	Screen call_prev_screen;
 } App;
 
 extern App g_app;
@@ -124,7 +141,11 @@ void  msg_set_text(Msg *m, const char *text);
 
 // ---------------------------------------------------------------- client.c
 void client_on_line(char **f, int n);
-void client_on_bin(const char *tag, int w, int h, unsigned char *data, size_t len);
+void client_on_bin(const char *tag, const char *kind, int w, int h, unsigned char *data, size_t len);
+void client_call_start(const char *jid);
+void client_call_accept(void);
+void client_call_hangup(void);
+void client_tick(void); // per-frame housekeeping (call timeouts)
 void client_auth(void);
 void client_request_chats(void);
 void client_open_chat(const Chat *c);
@@ -153,7 +174,8 @@ char *ui_wrap(const char *text, float maxw, float scale, int *lines, float *wide
 float ui_text_width(const char *text, float scale);
 // Bottom-screen hit testing shared with input handling in main.c.
 int   ui_chat_row_at(int y);   // index into chats or -1
-int   ui_chat_button_at(int x, int y); // 0 write, 1 image, 2 older, 3 back, -1 none
+int   ui_chat_button_at(int x, int y); // 0 write, 1 image, 2 call, 3 older, 4 back, -1 none
+int   ui_call_button_at(int x, int y); // 0 left, 1 right, -1 none
 void  ui_show_toast(const char *text, int seconds);
 void  ui_ensure_selected_visible(void);
 
@@ -161,6 +183,25 @@ void  ui_ensure_selected_visible(void);
 bool  image_set_jpeg(const unsigned char *data, size_t len, char *err, size_t errlen);
 void  image_draw(float x, float y, float maxw, float maxh);
 void  image_free(void);
+
+// ---------------------------------------------------------------- audio.c
+#define CALL_RATE  16000
+#define CALL_FRAME 320 // 20 ms
+
+bool  audio_init(void);          // false if the DSP firmware is missing
+bool  audio_available(void);
+void  audio_exit(void);
+void  audio_ring(int kind);      // 0 off, 1 incoming ring, 2 outgoing ringback
+bool  audio_call_begin(void);    // starts the microphone and playback
+void  audio_call_end(void);
+void  audio_update(void);        // call every frame: reads the mic and sends audio
+void  audio_play_frame(const unsigned char *frame, size_t len);
+float audio_mic_level(void);     // 0..1, for the level meter
+
+// ---------------------------------------------------------------- adpcm.c
+typedef struct { int pred, index; } AdpcmState;
+size_t adpcm_encode(AdpcmState *st, const s16 *in, int n, unsigned char *out);
+int    adpcm_decode(const unsigned char *frame, size_t len, s16 *out, int max);
 
 // ---------------------------------------------------------------- util
 void  fmt_time(s64 ts, char *out, size_t n, bool with_date);

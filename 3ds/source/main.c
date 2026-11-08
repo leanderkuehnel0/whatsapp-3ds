@@ -198,9 +198,15 @@ static void chat_action(int action)
 			client_request_image(&g_app.msgs[g_app.msg_sel]);
 		break;
 	case 2:
-		client_load_older();
+		if (!g_app.cur_group)
+			client_call_start(g_app.cur_jid);
+		else
+			ui_show_toast("Group calls are not supported", 3);
 		break;
 	case 3:
+		client_load_older();
+		break;
+	case 4:
 		leave_chat();
 		break;
 	}
@@ -239,10 +245,12 @@ static void input_chat(u32 down, u32 repeat)
 		chat_action(0);
 	else if (down & KEY_Y)
 		chat_action(1);
-	else if (down & KEY_L)
+	else if (down & KEY_X)
 		chat_action(2);
-	else if (down & KEY_B)
+	else if (down & KEY_L)
 		chat_action(3);
+	else if (down & KEY_B)
+		chat_action(4);
 	else if (down & KEY_TOUCH) {
 		touchPosition tp;
 		hidTouchRead(&tp);
@@ -258,6 +266,37 @@ static void input_image(u32 down)
 		image_free();
 		g_app.img_ready = false;
 		g_app.screen = ST_CHAT;
+	}
+}
+
+static void input_call(u32 down)
+{
+	int b = -1;
+	if (down & KEY_TOUCH) {
+		touchPosition tp;
+		hidTouchRead(&tp);
+		b = ui_call_button_at(tp.px, tp.py);
+	}
+	switch (g_app.call_state) {
+	case CALL_INCOMING:
+		if (down & KEY_A || b == 1)
+			client_call_accept();
+		else if (down & KEY_B || b == 0)
+			client_call_hangup();
+		break;
+	case CALL_RINGING:
+	case CALL_CONNECTING:
+		if (down & KEY_B || b == 1)
+			client_call_hangup();
+		break;
+	case CALL_ACTIVE:
+		if (down & KEY_B || b == 1)
+			client_call_hangup();
+		else if (down & KEY_X || b == 0)
+			g_app.call_muted = !g_app.call_muted;
+		break;
+	default:
+		break;
 	}
 }
 
@@ -287,6 +326,7 @@ int main(void)
 	hidSetRepeatParameters(20, 5);
 	net_init();
 	ui_init();
+	audio_init(); // without DSP firmware, calls still connect but are silent
 	g_app.stick_bottom = true;
 
 	if (config_load()) {
@@ -298,8 +338,13 @@ int main(void)
 	while (aptMainLoop()) {
 		hidScanInput();
 		u32 down = hidKeysDown(), repeat = hidKeysDownRepeat(), held = hidKeysHeld();
-		if (down & KEY_START)
+		if (down & KEY_START) {
+			if (g_app.screen == ST_CALL && g_app.call_state != CALL_ENDED) {
+				client_call_hangup();
+				continue;
+			}
 			break;
+		}
 
 		switch (g_app.screen) {
 		case ST_SETUP:
@@ -334,6 +379,9 @@ int main(void)
 		case ST_IMAGE:
 			input_image(down);
 			break;
+		case ST_CALL:
+			input_call(down);
+			break;
 		}
 
 		// networking
@@ -365,9 +413,14 @@ int main(void)
 			start_connect(); // background reconnect, stays on the current screen
 		}
 
+		audio_update();
+		client_tick();
 		ui_render();
 	}
 
+	if (g_app.call_state != CALL_NONE && g_app.call_state != CALL_ENDED)
+		client_call_hangup();
+	audio_exit();
 	net_exit();
 	ui_exit();
 	gfxExit();

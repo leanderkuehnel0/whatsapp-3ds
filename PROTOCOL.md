@@ -25,6 +25,10 @@ certificate (DER), trusting it on first use, so no CA chain is involved.
 | `T SEND <chat jid> <text>` | `T OK <message id>`; the sent message is also broadcast as an event |
 | `T READ <chat jid>` | `T OK`; sends read receipts and clears the unread counter |
 | `T MEDIA <chat jid> <message id>` | `T BIN <length> <width> <height>` + JPEG bytes (fits within 400×240), or `T ERR <reason>` |
+| `T CALL <chat jid>` | `T OK <call id>`; starts an outgoing voice call (1:1 chats only) |
+| `T ACCEPT <call id>` | `T OK`; answers a ringing incoming call |
+| `T HANGUP <call id>` | `T OK`; declines a ringing incoming call, or ends the call |
+| `T AUD <length>` + bytes | microphone audio frame during a call (see below); no reply |
 
 ## Records
 
@@ -43,4 +47,17 @@ Timestamps are Unix seconds.
 | `* CHAT <chat>` | chat metadata changed (name, unread, preview) |
 | `* RELOAD` | bulk change (history sync); the client should re-fetch `CHATS` |
 | `* STATUS <state>` | WhatsApp connection state: `connected`, `disconnected`, `logged_out` |
-| `* CALL <chat jid> <caller name> <ts>` | incoming call (shown as a missed call; calls are not supported yet) |
+| `* CALLSTATE <call id> <chat jid> <name> <state> <in/out> <end reason>` | call progress; `state` is `ringing` (outgoing), `incoming`, `connecting`, `active` or `ended`. Sent again right after `AUTH` if a call is in progress. |
+| `* AUD <length>` + bytes | audio frame from the other person during a call |
+
+## Call audio
+
+Both directions use 16 kHz mono audio in 20 ms frames (320 samples) encoded as IMA ADPCM:
+
+- bytes 0–1: int16 LE predictor
+- byte 2: step index (0–88)
+- byte 3: reserved (0)
+- then 160 bytes of 4-bit codes, low nibble first
+
+Every frame starts from the state in its own header, so a lost frame does not affect the next one.
+The bridge drops audio frames for a client whose connection can't keep up instead of buffering them.
