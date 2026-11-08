@@ -98,11 +98,12 @@ jobs:
           done
           grep -qi "000400000f3da500" cia-info.txt || { echo "::error::unexpected title ID"; exit 1; }
           echo "services and title ID OK"
-          # the code must not be compressed (see EnableCompress in cia.rsf)
-          grep -niE "flag|compress|sd ?app" cia-info.txt | head -20 || true
-          if grep -iE "compress(ed)? ?(exefs ?)?code[^:]*: *(yes|true|1)" cia-info.txt; then
-            echo "::error::.cia code is compressed"; exit 1
-          fi
+          # the code must not be compressed (see EnableCompress in cia.rsf):
+          # bit 0 of the exheader flags byte ("Flags: 02 [sd app]") marks compressed code
+          flags=$(grep -m1 -oE "^Flags: +[0-9a-fA-F]{2} \[" cia-info.txt | grep -oE "[0-9a-fA-F]{2}")
+          echo "exheader flags: 0x$flags"
+          test -n "$flags" || { echo "::error::could not read exheader flags"; exit 1; }
+          if (( 0x$flags & 1 )); then echo "::error::.cia code is compressed"; exit 1; fi
 
       - uses: actions/upload-artifact@v5
         with:
