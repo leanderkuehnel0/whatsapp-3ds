@@ -226,6 +226,11 @@ void  audio_call_end(void);
 void  audio_update(void);        // call every frame: reads the mic and sends audio
 void  audio_play_frame(const unsigned char *frame, size_t len);
 float audio_mic_level(void);     // 0..1, for the level meter
+float audio_peer_level(void);    // 0..1, loudness of the other side
+typedef struct {
+	u32 received, played, late, inactive, bad, underruns;
+} AudioCallStats;
+void  audio_call_stats(AudioCallStats *out);
 // voice-message recording (16 kHz ADPCM frames, max 2 minutes)
 bool  audio_record_start(void);  // false while in a call or if the mic is unavailable
 bool  audio_recording(void);     // false again once stopped or the limit is reached

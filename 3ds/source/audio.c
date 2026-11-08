@@ -35,6 +35,10 @@ static int   frame_n;
 static AdpcmState enc;
 static float level;
 
+// incoming call audio diagnostics (shown on the call screen)
+static AudioCallStats stats;
+static float peer_level;
+
 typedef enum { MIC_OFF, MIC_CALL, MIC_RECORD } MicMode;
 static MicMode mic_mode;
 
@@ -202,6 +206,8 @@ bool audio_call_begin(void)
 	audio_clip_stop();
 	if (mic_on && mic_mode == MIC_RECORD)
 		audio_record_discard(); // an incoming call wins over a half-done recording
+	memset(&stats, 0, sizeof stats);
+	peer_level = 0;
 	return mic_start(MIC_CALL);
 }
 
@@ -352,6 +358,8 @@ static void clip_update(void)
 }
 
 float audio_mic_level(void) { return level; }
+float audio_peer_level(void) { return peer_level; }
+void  audio_call_stats(AudioCallStats *out) { *out = stats; }
 
 static void send_frame(void)
 {
@@ -446,17 +454,33 @@ static void enqueue(const s16 *pcm, int n)
 
 void audio_play_frame(const unsigned char *data, size_t len)
 {
-	if (!dsp_ok || g_app.call_state != CALL_ACTIVE)
+	stats.received++;
+	if (!dsp_ok || g_app.call_state != CALL_ACTIVE) {
+		stats.inactive++;
 		return;
+	}
 	s16 pcm[CALL_FRAME];
 	int n = adpcm_decode(data, len, pcm, CALL_FRAME);
-	if (n <= 0)
+	if (n <= 0) {
+		stats.bad++;
 		return;
+	}
+	int peak = 0;
+	for (int i = 0; i < n; i++)
+		if (abs(pcm[i]) > peak)
+			peak = abs(pcm[i]);
+	float l = peak / 32768.0f;
+	peer_level = l > peer_level ? l : peer_level * 0.85f;
 	int q = queued();
-	if (q >= MAX_QUEUED)
+	if (q >= MAX_QUEUED) {
+		stats.late++;
 		return; // too far behind: drop to catch up
-	if (q == 0)
+	}
+	if (q == 0) {
+		stats.underruns++;
 		for (int i = 0; i < PREBUFFER; i++)
 			enqueue(NULL, CALL_FRAME);
+	}
 	enqueue(pcm, n);
+	stats.played++;
 }

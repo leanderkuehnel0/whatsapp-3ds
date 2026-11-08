@@ -846,6 +846,17 @@ static void draw_top_call(void)
 		rect(120, 180, 160, 6, C2D_Color32(0x26, 0x32, 0x38, 0xFF));
 		rect(120, 180, 160 * (g_app.call_muted ? 0 : l), 6, COL_ACCENT);
 		text(g_app.call_muted ? "Microphone muted" : "Microphone", TOP_W / 2, 190, 0.4f, COL_MUTED, C2D_AlignCenter);
+
+		// what arrives from the other side; helps tell a network problem from a sound problem
+		AudioCallStats cs;
+		audio_call_stats(&cs);
+		char d[96];
+		snprintf(d, sizeof d, "Incoming audio: %lu frames, %lu played, %lu late, %lu gaps",
+		         (unsigned long)cs.received, (unsigned long)cs.played, (unsigned long)cs.late, (unsigned long)cs.underruns);
+		text(d, TOP_W / 2, 6, 0.38f, COL_MUTED, C2D_AlignCenter);
+		float p = audio_peer_level();
+		rect(120, 30, 160, 4, C2D_Color32(0x26, 0x32, 0x38, 0xFF));
+		rect(120, 30, 160 * (p > 1 ? 1 : p), 4, COL_ACCENT);
 	}
 	if (!audio_available())
 		text("No sound: dump the DSP firmware with DSP1", TOP_W / 2, 212, 0.42f, COL_RED, C2D_AlignCenter);

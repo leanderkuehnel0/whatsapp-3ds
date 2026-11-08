@@ -2,14 +2,14 @@ package call
 
 import (
 	"context"
-	"log/slog"
-	"sync"
-	"time"
 	"github.com/leanderkuehnel0/whatsapp-3ds/bridge/internal/voip/core"
 	"github.com/leanderkuehnel0/whatsapp-3ds/bridge/internal/voip/media"
 	"github.com/leanderkuehnel0/whatsapp-3ds/bridge/internal/voip/signaling"
 	"github.com/leanderkuehnel0/whatsapp-3ds/bridge/internal/voip/transport"
 	"github.com/leanderkuehnel0/whatsapp-3ds/bridge/internal/voip/wanode"
+	"log/slog"
+	"sync"
+	"time"
 
 	"go.mau.fi/whatsmeow/types"
 )
@@ -46,6 +46,8 @@ type CallManager struct {
 	OnIncoming    func(*CallInfo)
 	OnEnded       func(*CallInfo)
 	OnPeerAudio   func([]float32)
+
+	Stats MediaStats // wa3ds: receive-path counters for diagnosing one-way audio
 }
 
 func NewCallManager(sock core.VoipSocket, log *slog.Logger) *CallManager {

@@ -1,10 +1,11 @@
 package call
 
 import (
-	"time"
 	"github.com/leanderkuehnel0/whatsapp-3ds/bridge/internal/voip/core"
 	"github.com/leanderkuehnel0/whatsapp-3ds/bridge/internal/voip/media"
 	"github.com/leanderkuehnel0/whatsapp-3ds/bridge/internal/voip/transport"
+	"sync/atomic"
+	"time"
 )
 
 func (m *CallManager) initCodec() {
@@ -74,6 +75,7 @@ func (m *CallManager) sendOpusFrameLocked(opus []byte) {
 		return
 	}
 	m.relay.Broadcast(srtp)
+	m.Stats.Sent.Add(1)
 }
 
 func (m *CallManager) startSilenceKeepaliveLocked() {
@@ -106,29 +108,39 @@ func (m *CallManager) startSilenceKeepaliveLocked() {
 	}()
 }
 
+// MediaStats counts what happens to packets received from the relay (wa3ds addition).
+type MediaStats struct {
+	Received, Stun, NotRtp, OtherPT, OwnSsrc, NoSession, Unprotect, Empty, Decode, Delivered, Sent atomic.Int64
+	LastPT                                                                                         atomic.Int32
+}
+
 func (m *CallManager) onRelayData(data []byte) {
+	m.Stats.Received.Add(1)
 	if transport.IsStunPacket(data) {
+		m.Stats.Stun.Add(1)
 		return
 	}
-	if !transport.IsRtpPacket(data) {
-		return
-	}
-	if len(data) < 12 {
+	if !transport.IsRtpPacket(data) || len(data) < 12 {
+		m.Stats.NotRtp.Add(1)
 		return
 	}
 	pt := data[1] & 0x7f
 	if pt != core.PayloadTypeWhatsAppOpus {
+		m.Stats.OtherPT.Add(1)
+		m.Stats.LastPT.Store(int32(pt))
 		return
 	}
 
 	m.mu.Lock()
 	if m.srtpSession == nil || m.codec == nil {
 		m.mu.Unlock()
+		m.Stats.NoSession.Add(1)
 		return
 	}
 	ssrc := uint32(data[8])<<24 | uint32(data[9])<<16 | uint32(data[10])<<8 | uint32(data[11])
 	if ssrc == m.selfSsrc {
 		m.mu.Unlock()
+		m.Stats.OwnSsrc.Add(1)
 		return
 	}
 	if !m.actualPeerSet {
@@ -146,15 +158,19 @@ func (m *CallManager) onRelayData(data []byte) {
 	pkt, err := srtp.Unprotect(data)
 	if err != nil {
 		m.log.Debug("srtp unprotect error", "err", err)
+		m.Stats.Unprotect.Add(1)
 		return
 	}
 	if len(pkt.Payload) == 0 {
+		m.Stats.Empty.Add(1)
 		return
 	}
 	pcm, err := codec.Decode(pkt.Payload)
 	if err != nil {
+		m.Stats.Decode.Add(1)
 		return
 	}
+	m.Stats.Delivered.Add(1)
 	pcm = media.NormalizeFrame(pcm, codec.FrameSize())
 	if m.OnPeerAudio != nil {
 		m.OnPeerAudio(pcm)

@@ -8,6 +8,8 @@ import (
 	"math"
 	"os"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/leanderkuehnel0/whatsapp-3ds/bridge/internal/voip/call"
 	"github.com/leanderkuehnel0/whatsapp-3ds/bridge/internal/voip/core"
@@ -35,6 +37,9 @@ type CallHub struct {
 	audioMu  sync.Mutex
 	encState adpcmState
 	peerBuf  []int16 // peer audio waiting to fill a 20 ms frame
+
+	// call audio diagnostics, logged every few seconds during a call
+	toClient, clientDrop, noClient, micFrames atomic.Int64
 }
 
 func NewCallHub(b *Bridge, debug bool) *CallHub {
@@ -108,7 +113,29 @@ func (h *CallHub) newManager(id string) *call.CallManager {
 	h.calls[id] = cm
 	h.mu.Unlock()
 	h.resetAudio()
+	go h.logStats(id, cm)
 	return cm
+}
+
+// logStats logs, every 5 s while a call is active, what happened to its audio in both
+// directions. One-way audio shows up as a counter that stays at zero.
+func (h *CallHub) logStats(id string, cm *call.CallManager) {
+	t := time.NewTicker(5 * time.Second)
+	defer t.Stop()
+	for range t.C {
+		if h.get(id) == nil {
+			return
+		}
+		c := cm.CurrentCall()
+		if c == nil || (c.StateData.State != core.CallStateActive && c.StateData.State != core.CallStateConnecting) {
+			continue
+		}
+		st := &cm.Stats
+		log.Printf("Call %s audio: whatsapp->bridge pkts=%d stun=%d notrtp=%d otherpt=%d(last %d) ownssrc=%d nosession=%d srtperr=%d empty=%d decodeerr=%d decoded=%d | bridge->3ds frames=%d dropped=%d noclient=%d | 3ds->bridge frames=%d bridge->whatsapp pkts=%d",
+			id, st.Received.Load(), st.Stun.Load(), st.NotRtp.Load(), st.OtherPT.Load(), st.LastPT.Load(), st.OwnSsrc.Load(),
+			st.NoSession.Load(), st.Unprotect.Load(), st.Empty.Load(), st.Decode.Load(), st.Delivered.Load(),
+			h.toClient.Load(), h.clientDrop.Load(), h.noClient.Load(), h.micFrames.Load(), st.Sent.Load())
+	}
 }
 
 func (h *CallHub) resetAudio() {
@@ -116,6 +143,10 @@ func (h *CallHub) resetAudio() {
 	h.encState = adpcmState{}
 	h.peerBuf = h.peerBuf[:0]
 	h.audioMu.Unlock()
+	h.toClient.Store(0)
+	h.clientDrop.Store(0)
+	h.noClient.Store(0)
+	h.micFrames.Store(0)
 }
 
 // HandleEvent routes WhatsApp call signaling. It reports whether the event was a call event.
@@ -272,7 +303,12 @@ func (h *CallHub) sendPeerAudio(pcm []float32) {
 	h.peerBuf = append(h.peerBuf[:0:0], h.peerBuf...)
 	h.audioMu.Unlock()
 	for _, f := range frames {
-		h.b.hub.BroadcastAudio(f)
+		sent, dropped := h.b.hub.BroadcastAudio(f)
+		h.toClient.Add(int64(sent))
+		h.clientDrop.Add(int64(dropped))
+		if sent+dropped == 0 {
+			h.noClient.Add(1)
+		}
 	}
 }
 
@@ -286,6 +322,7 @@ func (h *CallHub) FeedMicAudio(frame []byte) {
 	if samples == nil {
 		return
 	}
+	h.micFrames.Add(1)
 	pcm := make([]float32, len(samples))
 	for i, s := range samples {
 		pcm[i] = float32(s) / 32768

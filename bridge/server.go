@@ -43,14 +43,21 @@ func (h *Hub) Broadcast(l string) {
 }
 
 // BroadcastAudio queues one call audio frame for every client, dropping it for clients that lag behind.
-func (h *Hub) BroadcastAudio(frame []byte) {
-	if len(h.snapshot()) == 0 {
-		return
+// It returns how many clients got the frame and how many dropped it.
+func (h *Hub) BroadcastAudio(frame []byte) (sent, dropped int) {
+	conns := h.snapshot()
+	if len(conns) == 0 {
+		return 0, 0
 	}
 	msg := append([]byte(line("*", "AUD", strconv.Itoa(len(frame)))+"\n"), frame...)
-	for _, c := range h.snapshot() {
-		c.enqueue(msg, true)
+	for _, c := range conns {
+		if c.enqueue(msg, true) {
+			sent++
+		} else {
+			dropped++
+		}
 	}
+	return sent, dropped
 }
 
 // Conn is one connected 3DS. All writes go through a queue drained by one writer goroutine,
