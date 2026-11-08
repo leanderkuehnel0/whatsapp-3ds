@@ -69,6 +69,8 @@ static int entropy_source(void *data, unsigned char *out, size_t len, size_t *ol
 	return 0;
 }
 
+static int last_sock_errno;
+
 static int bio_send(void *ctx, const unsigned char *buf, size_t len)
 {
 	(void)ctx;
@@ -76,6 +78,7 @@ static int bio_send(void *ctx, const unsigned char *buf, size_t len)
 	if (r < 0) {
 		if (errno == EAGAIN || errno == EWOULDBLOCK)
 			return MBEDTLS_ERR_SSL_WANT_WRITE;
+		last_sock_errno = errno;
 		return MBEDTLS_ERR_NET_SEND_FAILED;
 	}
 	return r;
@@ -88,8 +91,11 @@ static int bio_recv(void *ctx, unsigned char *buf, size_t len)
 	if (r < 0) {
 		if (errno == EAGAIN || errno == EWOULDBLOCK)
 			return MBEDTLS_ERR_SSL_WANT_READ;
+		last_sock_errno = errno;
 		return MBEDTLS_ERR_NET_RECV_FAILED;
 	}
+	if (r == 0)
+		last_sock_errno = ECONNRESET;
 	return r; // 0 = peer closed
 }
 
@@ -214,19 +220,22 @@ static bool connect_blocking(const char *host, int port, unsigned char fp[32], c
 	}
 	fcntl(sock, F_SETFL, fcntl(sock, F_GETFL, 0) | O_NONBLOCK);
 	r = connect(sock, res->ai_addr, res->ai_addrlen);
+	int connect_errno = errno;
 	freeaddrinfo(res);
-	if (r < 0 && errno != EINPROGRESS && errno != EALREADY && errno != EWOULDBLOCK)
-		return fail(err, errlen, "Could not connect to the bridge", errno);
+	if (r < 0 && connect_errno != EINPROGRESS && connect_errno != EALREADY && connect_errno != EWOULDBLOCK) {
+		char msg[96];
+		snprintf(msg, sizeof msg, "connect() failed: %s", strerror(connect_errno));
+		return fail(err, errlen, msg, connect_errno);
+	}
 	if (r < 0) {
 		int w = wait_sock(POLLOUT, osGetTime() + CONNECT_TIMEOUT_MS);
 		if (w < 0)
 			return fail(err, errlen, "Cancelled", 0);
 		if (w == 0)
 			return fail(err, errlen, "The bridge is not reachable (timed out).\nIs it running, and is the address right?", 0);
-		int soerr = 0;
-		socklen_t len = sizeof soerr;
-		if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &soerr, &len) == 0 && soerr != 0)
-			return fail(err, errlen, "Could not connect to the bridge", soerr);
+		// Deliberately no getsockopt(SO_ERROR) here: on the 3DS it passes the SOC service's raw
+		// value through and can report an error for a connection that worked. If the connect
+		// really failed, the TLS handshake below fails on its first send/receive instead.
 	}
 
 	mbedtls_entropy_add_source(&entropy, entropy_source, NULL, 32, MBEDTLS_ENTROPY_SOURCE_STRONG);
@@ -248,6 +257,11 @@ static bool connect_blocking(const char *host, int port, unsigned char fp[32], c
 
 	u64 deadline = osGetTime() + HANDSHAKE_TIMEOUT_MS;
 	while ((r = mbedtls_ssl_handshake(&ssl)) != 0) {
+		if (r == MBEDTLS_ERR_NET_SEND_FAILED || r == MBEDTLS_ERR_NET_RECV_FAILED || r == MBEDTLS_ERR_NET_CONN_RESET) {
+			char msg[96];
+			snprintf(msg, sizeof msg, "Connection to the bridge failed: %s", strerror(last_sock_errno));
+			return fail(err, errlen, msg, last_sock_errno);
+		}
 		if (r != MBEDTLS_ERR_SSL_WANT_READ && r != MBEDTLS_ERR_SSL_WANT_WRITE)
 			return fail(err, errlen, "TLS handshake failed - is this really the bridge?", r);
 		int w = wait_sock(r == MBEDTLS_ERR_SSL_WANT_READ ? POLLIN : POLLOUT, deadline);
