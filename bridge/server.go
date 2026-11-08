@@ -322,6 +322,7 @@ func (s *Server) dispatch(c *Conn, tag, cmd string, args []string) error {
 		}
 		lines := make([]string, 0, len(chats)+1)
 		for _, ch := range chats {
+			ch = b.fixChat(ctx, ch)
 			lines = append(lines, line(append([]string{tag, "CHAT"}, ch.fields()...)...))
 		}
 		return c.writeLines(append(lines, line(tag, "END"))...)
@@ -337,6 +338,7 @@ func (s *Server) dispatch(c *Conn, tag, cmd string, args []string) error {
 		if err != nil {
 			return errLine(err)
 		}
+		b.fixSenders(ctx, msgs)
 		lines := make([]string, 0, len(msgs)+1)
 		for _, m := range msgs {
 			lines = append(lines, line(append([]string{tag, "MSG"}, m.fields()...)...))

@@ -244,3 +244,76 @@ func (s *Store) UnreadIncoming(ctx context.Context, chat string, limit int) (map
 }
 
 var errNotFound = errors.New("not found")
+
+// SetSenderName updates the stored sender name on all messages from one sender.
+func (s *Store) SetSenderName(ctx context.Context, sender, name string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE wa3ds_messages SET sender_name = ? WHERE sender = ? AND from_me = 0`, name, sender)
+	return err
+}
+
+// ChatJIDsOnServer lists chats whose JID is on the given server (e.g. "lid").
+func (s *Store) ChatJIDsOnServer(ctx context.Context, server string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT jid FROM wa3ds_chats WHERE jid LIKE ?`, "%@"+server)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var j string
+		if err := rows.Scan(&j); err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
+// MergeChat moves all messages of chat from into chat to and combines the chat rows:
+// newest preview wins, unread counts add up, and a real name beats a placeholder.
+func (s *Store) MergeChat(ctx context.Context, from, to string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	get := func(jid string) (Chat, bool) {
+		var c Chat
+		err := tx.QueryRowContext(ctx, `SELECT jid, name, is_group, last_ts, unread, preview FROM wa3ds_chats WHERE jid = ?`, jid).
+			Scan(&c.JID, &c.Name, &c.IsGroup, &c.LastTS, &c.Unread, &c.Preview)
+		return c, err == nil
+	}
+	src, ok := get(from)
+	if !ok {
+		return nil
+	}
+	dst, ok := get(to)
+	if !ok {
+		dst = Chat{JID: to}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO wa3ds_chats (jid) VALUES (?)`, to); err != nil {
+			return err
+		}
+	}
+	if src.LastTS > dst.LastTS {
+		dst.LastTS, dst.Preview = src.LastTS, src.Preview
+	}
+	dst.Unread += src.Unread
+	if isFallbackName(dst.Name) && !isFallbackName(src.Name) {
+		dst.Name = src.Name
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE OR IGNORE wa3ds_messages SET chat = ? WHERE chat = ?`, to, from); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM wa3ds_messages WHERE chat = ?`, from); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE wa3ds_chats SET name = ?, last_ts = ?, unread = ?, preview = ? WHERE jid = ?`,
+		dst.Name, dst.LastTS, dst.Unread, dst.Preview, to); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM wa3ds_chats WHERE jid = ?`, from); err != nil {
+		return err
+	}
+	return tx.Commit()
+}

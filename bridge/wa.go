@@ -43,7 +43,10 @@ func (b *Bridge) handleEvent(rawEvt any) {
 	case *events.Connected:
 		log.Println("WhatsApp connected")
 		b.hub.Broadcast(line("*", "STATUS", "connected"))
-		go b.refreshGroupNames()
+		go func() {
+			b.refreshGroupNames()
+			b.cleanupChats(true)
+		}()
 	case *events.Disconnected:
 		log.Println("WhatsApp disconnected")
 		b.hub.Broadcast(line("*", "STATUS", "disconnected"))
@@ -54,6 +57,23 @@ func (b *Bridge) handleEvent(rawEvt any) {
 		if evt.Name != nil {
 			b.renameChat(ctx, evt.JID.String(), evt.Name.Name)
 		}
+	case *events.Contact:
+		if evt.Action != nil {
+			name := evt.Action.GetFullName()
+			if name == "" {
+				name = evt.Action.GetFirstName()
+			}
+			if name != "" {
+				b.renameIfKnown(ctx, b.normalizeChat(ctx, evt.JID).String(), name, false)
+			}
+		}
+	case *events.PushName:
+		if evt.NewPushName != "" {
+			b.renameIfKnown(ctx, b.normalizeChat(ctx, evt.JID).String(), evt.NewPushName, true)
+		}
+	case *events.AppStateSyncComplete:
+		// contact names may have arrived: merge LID chats and let clients refetch
+		go b.cleanupChats(true)
 	case *events.MarkChatAsRead:
 		if evt.Action.GetRead() {
 			b.setUnread(ctx, b.normalizeChat(ctx, evt.JID).String(), 0)
@@ -79,38 +99,114 @@ func skipChat(jid types.JID) bool {
 	return jid.Server == types.BroadcastServer || jid.Server == types.NewsletterServer || jid.IsEmpty()
 }
 
-// contactName picks the best display name for a user JID.
+// contactName picks the best display name for a user JID. When no name is known it returns a
+// placeholder (phone number, redacted number or "~id") that isFallbackName recognises.
 func (b *Bridge) contactName(ctx context.Context, jid types.JID) string {
+	jid = jid.ToNonAD()
+	pn := types.EmptyJID
 	lookup := []types.JID{jid}
 	if jid.Server == types.HiddenUserServer {
-		if pn, err := b.wa.Store.LIDs.GetPNForLID(ctx, jid); err == nil && !pn.IsEmpty() {
+		if p, err := b.wa.Store.LIDs.GetPNForLID(ctx, jid); err == nil && !p.IsEmpty() {
+			pn = p.ToNonAD()
 			lookup = append(lookup, pn)
 		}
 	} else if jid.Server == types.DefaultUserServer {
+		pn = jid
 		if lid, err := b.wa.Store.LIDs.GetLIDForPN(ctx, jid); err == nil && !lid.IsEmpty() {
-			lookup = append(lookup, lid)
+			lookup = append(lookup, lid.ToNonAD())
 		}
 	}
-	for _, j := range lookup {
-		c, err := b.wa.Store.Contacts.GetContact(ctx, j)
-		if err != nil || !c.Found {
-			continue
-		}
-		for _, n := range []string{c.FullName, c.FirstName, c.PushName, c.BusinessName} {
-			if n != "" {
+	redacted := ""
+	// prefer the address-book name from any alias over push names
+	for _, pick := range []func(types.ContactInfo) string{
+		func(c types.ContactInfo) string { return c.FullName },
+		func(c types.ContactInfo) string { return c.FirstName },
+		func(c types.ContactInfo) string { return c.PushName },
+		func(c types.ContactInfo) string { return c.BusinessName },
+	} {
+		for _, j := range lookup {
+			c, err := b.wa.Store.Contacts.GetContact(ctx, j)
+			if err != nil || !c.Found {
+				continue
+			}
+			if n := strings.TrimSpace(pick(c)); n != "" {
 				return n
+			}
+			if c.RedactedPhone != "" {
+				redacted = c.RedactedPhone
 			}
 		}
 	}
-	if jid.Server == types.DefaultUserServer {
-		return "+" + jid.User
+	switch {
+	case !pn.IsEmpty():
+		return "+" + pn.User
+	case redacted != "":
+		return redacted
 	}
-	return jid.User
+	return "~" + jid.User
+}
+
+// isFallbackName reports whether a stored name is only a placeholder that should be
+// looked up again once contacts have synced.
+func isFallbackName(s string) bool {
+	if s == "" || s == "Group" || strings.HasPrefix(s, "+") || strings.HasPrefix(s, "~") {
+		return true
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// fixChat replaces a placeholder chat name with a real one if one is known by now.
+func (b *Bridge) fixChat(ctx context.Context, c Chat) Chat {
+	if !isFallbackName(c.Name) {
+		return c
+	}
+	jid, err := types.ParseJID(c.JID)
+	if err != nil || jid.Server == types.GroupServer {
+		return c // group names come from refreshGroupNames
+	}
+	name := b.contactName(ctx, jid)
+	if !isFallbackName(name) {
+		_ = b.store.EnsureChat(ctx, c.JID, name, false)
+		c.Name = name
+	} else if c.Name == "" || strings.HasPrefix(c.Name, "~") || !strings.HasPrefix(c.Name, "+") {
+		c.Name = name
+	}
+	return c
+}
+
+// fixSenders replaces placeholder sender names in group messages.
+func (b *Bridge) fixSenders(ctx context.Context, msgs []Msg) {
+	cache := map[string]string{}
+	for i := range msgs {
+		m := &msgs[i]
+		if m.FromMe || !isFallbackName(m.SenderName) || m.Sender == "" {
+			continue
+		}
+		name, ok := cache[m.Sender]
+		if !ok {
+			name = m.SenderName
+			if jid, err := types.ParseJID(m.Sender); err == nil {
+				if n := b.contactName(ctx, jid); !isFallbackName(n) || name == "" {
+					name = n
+				}
+			}
+			cache[m.Sender] = name
+			if !isFallbackName(name) {
+				_ = b.store.SetSenderName(ctx, m.Sender, name)
+			}
+		}
+		m.SenderName = name
+	}
 }
 
 // chatName returns the stored name for a chat, resolving it from WhatsApp when missing.
 func (b *Bridge) chatName(ctx context.Context, jid types.JID) string {
-	if name := b.store.ChatName(ctx, jid.String()); name != "" && !strings.HasPrefix(name, "+") {
+	if name := b.store.ChatName(ctx, jid.String()); !isFallbackName(name) {
 		return name
 	}
 	if jid.Server == types.GroupServer {
@@ -140,6 +236,7 @@ func (b *Bridge) setUnread(ctx context.Context, jid string, n int) {
 
 func (b *Bridge) broadcastChat(ctx context.Context, jid string) {
 	if c, err := b.store.GetChat(ctx, jid); err == nil && c.LastTS > 0 {
+		c = b.fixChat(ctx, c)
 		b.hub.Broadcast(line(append([]string{"*", "CHAT"}, c.fields()...)...))
 	}
 }
@@ -256,6 +353,15 @@ func previewOf(m Msg, isGroup bool) string {
 // handleMessage stores a WhatsApp message and, when live, pushes it to connected clients.
 func (b *Bridge) handleMessage(ctx context.Context, evt *events.Message, live bool) {
 	chat := b.normalizeChat(ctx, evt.Info.Chat)
+	if chat.Server == types.HiddenUserServer && !evt.Info.IsGroup {
+		alt := evt.Info.SenderAlt
+		if evt.Info.IsFromMe {
+			alt = evt.Info.RecipientAlt
+		}
+		if alt.Server == types.DefaultUserServer {
+			chat = alt.ToNonAD()
+		}
+	}
 	if skipChat(chat) || evt.Message == nil {
 		return
 	}
@@ -288,9 +394,15 @@ func (b *Bridge) handleMessage(ctx context.Context, evt *events.Message, live bo
 		log.Printf("ensure chat: %v", err)
 		return
 	}
-	// Fill in the chat name the first time we see the chat.
-	if name := b.store.ChatName(ctx, chatJID); name == "" {
-		_ = b.store.EnsureChat(ctx, chatJID, b.chatName(ctx, chat), isGroup)
+	// Fill in the chat name, or upgrade a placeholder now that a real name may be known.
+	if name := b.store.ChatName(ctx, chatJID); isFallbackName(name) {
+		newName := b.chatName(ctx, chat)
+		if isFallbackName(newName) && !isGroup && !evt.Info.IsFromMe && evt.Info.PushName != "" {
+			newName = evt.Info.PushName
+		}
+		if name == "" || !isFallbackName(newName) {
+			_ = b.store.EnsureChat(ctx, chatJID, newName, isGroup)
+		}
 	}
 
 	senderName := evt.Info.PushName
@@ -377,6 +489,7 @@ func (b *Bridge) handleHistorySync(ctx context.Context, evt *events.HistorySync)
 		}
 	}
 	log.Printf("History sync: %d conversations, %d messages", len(convs), count)
+	b.cleanupChats(false)
 	b.hub.Broadcast(line("*", "RELOAD"))
 }
 
@@ -442,4 +555,60 @@ func isCallEvent(evt any) bool {
 		return true
 	}
 	return false
+}
+
+// renameIfKnown updates an existing chat's name. Push names only replace placeholders,
+// never a name from the address book.
+func (b *Bridge) renameIfKnown(ctx context.Context, jid, name string, onlyPlaceholder bool) {
+	cur, err := b.store.GetChat(ctx, jid)
+	if err != nil || cur.IsGroup || cur.Name == name {
+		return
+	}
+	if onlyPlaceholder && !isFallbackName(cur.Name) {
+		return
+	}
+	b.renameChat(ctx, jid, name)
+}
+
+// cleanupChats merges chats stored under a LID into the phone-number chat for the same person
+// and upgrades placeholder names. With notify, clients are told to refetch if anything changed.
+func (b *Bridge) cleanupChats(notify bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	lids, err := b.store.ChatJIDsOnServer(ctx, types.HiddenUserServer)
+	if err != nil {
+		log.Printf("cleanup chats: %v", err)
+		return
+	}
+	merged := 0
+	for _, l := range lids {
+		lid, err := types.ParseJID(l)
+		if err != nil {
+			continue
+		}
+		pn, err := b.wa.Store.LIDs.GetPNForLID(ctx, lid)
+		if err != nil || pn.IsEmpty() {
+			continue
+		}
+		if err := b.store.MergeChat(ctx, l, pn.ToNonAD().String()); err != nil {
+			log.Printf("merge chat %s: %v", l, err)
+			continue
+		}
+		merged++
+	}
+	renamed := 0
+	chats, err := b.store.Chats(ctx, 1000)
+	if err == nil {
+		for _, c := range chats {
+			if isFallbackName(c.Name) && !isFallbackName(b.fixChat(ctx, c).Name) {
+				renamed++
+			}
+		}
+	}
+	if merged > 0 || renamed > 0 {
+		log.Printf("Chat cleanup: merged %d duplicate LID chats, found names for %d chats", merged, renamed)
+		if notify {
+			b.hub.Broadcast(line("*", "RELOAD"))
+		}
+	}
 }

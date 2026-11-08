@@ -254,3 +254,51 @@ func TestCallCommandsAndAudioFraming(t *testing.T) {
 		}
 	}
 }
+
+func TestIsFallbackName(t *testing.T) {
+	for _, s := range []string{"", "+491701234567", "123456789012345", "~1234", "+1∙∙∙∙80", "Group"} {
+		if !isFallbackName(s) {
+			t.Errorf("%q should be a placeholder", s)
+		}
+	}
+	for _, s := range []string{"Alice", "Mom ❤️", "4 Non Blondes"} {
+		if isFallbackName(s) {
+			t.Errorf("%q is a real name", s)
+		}
+	}
+}
+
+func TestMergeChat(t *testing.T) {
+	_, b, _ := newTestServer(t)
+	ctx := context.Background()
+	lid, pn := "1234567890@lid", "491701234567@s.whatsapp.net"
+	_ = b.store.EnsureChat(ctx, lid, "Alice", false)
+	_ = b.store.EnsureChat(ctx, pn, "+491701234567", false)
+	put := func(chat, id string, ts int64) {
+		m := Msg{Chat: chat, ID: id, TS: ts, Kind: "text", Text: id}
+		if err := b.store.PutMessage(ctx, m, id, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put(pn, "old", 100)
+	put(lid, "new", 200)
+	put(lid, "old", 100) // duplicate of a message already in the PN chat
+
+	if err := b.store.MergeChat(ctx, lid, pn); err != nil {
+		t.Fatal(err)
+	}
+	c, err := b.store.GetChat(ctx, pn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Name != "Alice" || c.LastTS != 200 || c.Preview != "new" || c.Unread != 3 {
+		t.Fatalf("merged chat: %+v", c)
+	}
+	if _, err := b.store.GetChat(ctx, lid); err == nil {
+		t.Fatal("LID chat should be gone")
+	}
+	msgs, _ := b.store.Messages(ctx, pn, 0, 10)
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages after merge, got %d", len(msgs))
+	}
+}
