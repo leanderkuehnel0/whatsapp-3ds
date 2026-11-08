@@ -50,8 +50,9 @@ AccessControlInfo:
   CanAccessCore2                : true
   SystemMode                    : 64MB
   HandleTableSize               : 0x200
+  # DSP memory, read-write: ndspInit() writes to it (read-only made audio setup crash)
   MemoryMapping:
-    - 0x1FF00000-0x1FF7FFFF:r
+    - 0x1FF00000-0x1FF7FFFF
   SystemCallAccess:
     ControlMemory: 1
     QueryMemory: 2
