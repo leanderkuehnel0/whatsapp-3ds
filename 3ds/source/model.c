@@ -82,12 +82,6 @@ void chats_filter(void)
 			g_app.chat_sel = i;
 }
 
-static int chat_cmp(const void *a, const void *b)
-{
-	s64 ta = ((const Chat *)a)->ts, tb = ((const Chat *)b)->ts;
-	return ta < tb ? 1 : ta > tb ? -1 : 0;
-}
-
 void chats_sort(void)
 {
 	// keep the selection on the same chat across reordering
