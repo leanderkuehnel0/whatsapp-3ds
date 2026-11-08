@@ -21,9 +21,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install 3DS libraries
+      # 3ds-mbedtls and 3ds-libjpeg-turbo ship with the devkitarm image; pkg.devkitpro.org
+      # rejects downloads from CI runners, so check for them instead of installing.
+      - name: Check 3DS libraries
         run: |
-          dkp-pacman -Sy --noconfirm --needed 3ds-mbedtls 3ds-libjpeg-turbo
+          test -f "$DEVKITPRO/portlibs/3ds/include/jpeglib.h" || { echo "::error::3ds-libjpeg-turbo missing from image"; exit 1; }
           grep -m1 'define MBEDTLS_VERSION_STRING ' "$DEVKITPRO/portlibs/3ds/include/mbedtls/version.h"
           # certificate pinning reads the peer certificate after the handshake
           grep -E '^#define MBEDTLS_SSL_KEEP_PEER_CERTIFICATE' "$DEVKITPRO/portlibs/3ds/include/mbedtls/config.h" \
