@@ -1,0 +1,21 @@
+[Unit]
+Description=WA3DS bridge (WhatsApp for Nintendo 3DS)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=wa3ds
+Group=wa3ds
+ExecStart=/opt/wa3ds/wa3ds-bridge -data /var/lib/wa3ds -listen :7473
+Restart=on-failure
+RestartSec=10
+
+# hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/wa3ds
+
+[Install]
+WantedBy=multi-user.target
