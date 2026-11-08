@@ -50,9 +50,13 @@ AccessControlInfo:
   CanAccessCore2                : true
   SystemMode                    : 64MB
   HandleTableSize               : 0x200
-  # DSP memory, read-write: ndspInit() writes to it (read-only made audio setup crash)
+  # Same mappings Luma's hbldr gives .3dsx homebrew:
+  #  - DSP memory read-write: ndspInit() writes to it
+  #  - VRAM read-only: the system keyboard's screen capture (aptScreenTransfer) reads the
+  #    displayed framebuffer, which can be in VRAM; unmapped, opening the keyboard crashed
   MemoryMapping:
     - 0x1FF00000-0x1FF7FFFF
+    - 0x1F000000-0x1F5FFFFF:r
   SystemCallAccess:
     ControlMemory: 1
     QueryMemory: 2
