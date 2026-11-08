@@ -46,8 +46,12 @@ void net_close(void); // also cancels a connect in progress
 bool net_connected(void);
 // Sends one line made of fields (escaped here). Returns false if the connection broke.
 bool net_send(const char **fields, int nfields);
-// Sends "<tag> <kind> <len>" followed by raw bytes (max 1024).
+// Sends "<tag> <kind> <len>" followed by raw bytes; used for call audio (dropped when backlogged).
 bool net_send_binary(const char *tag, const char *kind, const unsigned char *data, size_t len);
+// Sends a request line followed by a payload (the length must be one of the fields).
+bool net_send_payload(const char **fields, int nfields, const unsigned char *data, size_t len);
+// Progress of the last payload upload; returns true while it is still being sent.
+bool net_upload_progress(size_t *sent, size_t *total);
 // Reads whatever has arrived and dispatches complete lines. Returns false if the connection broke.
 bool net_poll(LineHandler on_line, BinHandler on_bin);
 // Bytes received so far of a pending BIN payload (for progress display).
@@ -80,7 +84,7 @@ typedef struct {
 	float y, h;     // layout within the conversation
 } Msg;
 
-typedef enum { ST_SETUP, ST_CONNECTING, ST_TRUST, ST_ERROR, ST_CHATS, ST_CHAT, ST_IMAGE, ST_CALL } Screen;
+typedef enum { ST_SETUP, ST_CONNECTING, ST_TRUST, ST_ERROR, ST_CHATS, ST_CHAT, ST_IMAGE, ST_CALL, ST_CAMERA, ST_VOICE } Screen;
 
 typedef enum { CALL_NONE, CALL_RINGING, CALL_INCOMING, CALL_CONNECTING, CALL_ACTIVE, CALL_ENDED } CallState;
 
@@ -136,6 +140,16 @@ typedef struct {
 	u64    call_ended_at;
 	char   call_end_reason[32];
 	Screen call_prev_screen;
+
+	// photo / voice-message composer
+	char   caption[256];
+	bool   uploading;        // a photo or voice note is being sent
+	int    upload_result;    // 0 pending/none, 1 sent, -1 failed (see upload_err)
+	char   upload_err[96];
+
+	// voice-message playback in a chat
+	bool   voice_loading;
+	char   voice_id[72];     // message being loaded or played
 } App;
 
 extern App g_app;
@@ -156,6 +170,9 @@ void client_call_start(const char *jid);
 void client_call_accept(void);
 void client_call_hangup(void);
 void client_tick(void); // per-frame housekeeping (call timeouts)
+void client_send_image(const unsigned char *jpeg, size_t len, const char *caption);
+void client_send_voice(const unsigned char *adpcm, size_t len);
+void client_play_voice(const Msg *m); // toggles: stops if this message is already playing
 void client_auth(void);
 void client_request_chats(void);
 void client_open_chat(const Chat *c);
@@ -184,8 +201,10 @@ char *ui_wrap(const char *text, float maxw, float scale, int *lines, float *wide
 float ui_text_width(const char *text, float scale);
 // Bottom-screen hit testing shared with input handling in main.c.
 int   ui_chat_row_at(int y);   // index into chats or -1
-int   ui_chat_button_at(int x, int y); // 0 write, 1 image, 2 call, 3 older, 4 back, -1 none
+// chat buttons: 0 write, 1 photo, 2 voice, 3 view/play, 4 call, 5 older, 6 back, -1 none
+int   ui_chat_button_at(int x, int y);
 int   ui_call_button_at(int x, int y); // 0 left, 1 right, -1 none
+int   ui_compose_button_at(int x, int y); // camera/voice screens: 0 left, 1 middle, 2 right, -1 none
 void  ui_show_toast(const char *text, int seconds);
 void  ui_ensure_selected_visible(void);
 
@@ -207,6 +226,31 @@ void  audio_call_end(void);
 void  audio_update(void);        // call every frame: reads the mic and sends audio
 void  audio_play_frame(const unsigned char *frame, size_t len);
 float audio_mic_level(void);     // 0..1, for the level meter
+// voice-message recording (16 kHz ADPCM frames, max 2 minutes)
+bool  audio_record_start(void);  // false while in a call or if the mic is unavailable
+bool  audio_recording(void);     // false again once stopped or the limit is reached
+void  audio_record_stop(void);
+void  audio_record_discard(void);
+u32   audio_record_ms(void);
+const unsigned char *audio_record_data(size_t *len);
+// voice-message playback; takes ownership of data (malloc'd ADPCM frames)
+bool  audio_clip_play(unsigned char *data, size_t len);
+void  audio_clip_stop(void);
+bool  audio_clip_playing(void);
+void  audio_clip_progress(u32 *pos_ms, u32 *total_ms);
+
+// ---------------------------------------------------------------- camera.c
+bool  cam_open(bool front, char *err, size_t errlen);
+void  cam_close(void);
+void  cam_update(void);          // call every frame while the camera screen is open
+void  cam_switch(void);          // front <-> rear
+bool  cam_is_front(void);
+bool  cam_has_frame(void);
+bool  cam_frozen(void);
+bool  cam_snap(void);            // freeze the current frame
+void  cam_retake(void);
+void  cam_draw(float x, float y); // 320x240 preview
+bool  cam_jpeg(unsigned char **out, unsigned long *outlen, int quality);
 
 // ---------------------------------------------------------------- adpcm.c
 typedef struct { int pred, index; } AdpcmState;

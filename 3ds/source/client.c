@@ -6,7 +6,7 @@
 #include <string.h>
 #include <time.h>
 
-typedef enum { RQ_NONE, RQ_AUTH, RQ_CHATS, RQ_MSGS, RQ_OLDER, RQ_SEND, RQ_READ, RQ_MEDIA, RQ_PING, RQ_CALL, RQ_CALLCTL } ReqType;
+typedef enum { RQ_NONE, RQ_AUTH, RQ_CHATS, RQ_MSGS, RQ_OLDER, RQ_SEND, RQ_READ, RQ_MEDIA, RQ_PING, RQ_CALL, RQ_CALLCTL, RQ_UPLOAD, RQ_VOICEGET } ReqType;
 
 typedef struct {
 	int     tag;
@@ -63,6 +63,12 @@ void client_reset(void)
 	g_app.authed = false;
 	g_app.loading_msgs = false;
 	g_app.img_loading = false;
+	g_app.voice_loading = false;
+	if (g_app.uploading) {
+		g_app.uploading = false;
+		g_app.upload_result = -1;
+		strcpy(g_app.upload_err, "Connection lost while sending");
+	}
 }
 
 static bool request(ReqType type, const char *jid, const char *id, const char **args, int nargs)
@@ -81,6 +87,75 @@ static bool request(ReqType type, const char *jid, const char *id, const char **
 		return false;
 	}
 	return true;
+}
+
+static bool request_payload(ReqType type, const char *jid, const char *id, const char **args, int nargs,
+                            const unsigned char *data, size_t len)
+{
+	Pending *p = pending_add(type, jid, id);
+	if (!p)
+		return false;
+	char tag[12];
+	snprintf(tag, sizeof tag, "%d", p->tag);
+	const char *f[8];
+	f[0] = tag;
+	for (int i = 0; i < nargs && i < 7; i++)
+		f[i + 1] = args[i];
+	if (!net_send_payload(f, nargs + 1, data, len)) {
+		p->type = RQ_NONE;
+		return false;
+	}
+	return true;
+}
+
+static void upload_started(bool ok)
+{
+	g_app.upload_err[0] = 0;
+	if (ok) {
+		g_app.uploading = true;
+		g_app.upload_result = 0;
+	} else {
+		g_app.uploading = false;
+		g_app.upload_result = -1;
+		strcpy(g_app.upload_err, "Not connected to the bridge");
+	}
+}
+
+void client_send_image(const unsigned char *jpeg, size_t len, const char *caption)
+{
+	char n[16];
+	snprintf(n, sizeof n, "%u", (unsigned)len);
+	const char *a[] = {"IMG", n, g_app.cur_jid, caption ? caption : ""};
+	upload_started(request_payload(RQ_UPLOAD, g_app.cur_jid, NULL, a, 4, jpeg, len));
+}
+
+void client_send_voice(const unsigned char *adpcm, size_t len)
+{
+	char n[16];
+	snprintf(n, sizeof n, "%u", (unsigned)len);
+	const char *a[] = {"VOICE", n, g_app.cur_jid};
+	upload_started(request_payload(RQ_UPLOAD, g_app.cur_jid, NULL, a, 3, adpcm, len));
+}
+
+void client_play_voice(const Msg *m)
+{
+	bool same = !strcmp(g_app.voice_id, m->id);
+	if (same && (audio_clip_playing() || g_app.voice_loading)) {
+		audio_clip_stop();
+		g_app.voice_loading = false;
+		g_app.voice_id[0] = 0;
+		return;
+	}
+	if (!audio_available()) {
+		ui_show_toast("No sound: dump the DSP firmware with DSP1 first", 5);
+		return;
+	}
+	audio_clip_stop();
+	strlcpy_utf8(g_app.voice_id, m->id, sizeof g_app.voice_id);
+	const char *a[] = {"VOICEGET", g_app.cur_jid, m->id};
+	g_app.voice_loading = request(RQ_VOICEGET, g_app.cur_jid, m->id, a, 3);
+	if (!g_app.voice_loading)
+		ui_show_toast("Not connected - can't load the voice message", 4);
 }
 
 void client_auth(void)
@@ -165,7 +240,12 @@ static u64 call_check_until;
 static void call_enter_screen(void)
 {
 	if (g_app.screen != ST_CALL) {
-		g_app.call_prev_screen = g_app.screen == ST_IMAGE ? ST_CHAT : g_app.screen;
+		Screen prev = g_app.screen;
+		if (prev == ST_VOICE)
+			audio_record_discard(); // the call needs the microphone
+		if (prev == ST_IMAGE || prev == ST_CAMERA || prev == ST_VOICE)
+			prev = ST_CHAT; // the camera/recorder are closed for the call
+		g_app.call_prev_screen = prev;
 		g_app.screen = ST_CALL;
 	}
 }
@@ -582,6 +662,26 @@ void client_on_line(char **f, int n)
 		}
 		break;
 
+	case RQ_UPLOAD:
+		if (!strcmp(kind, "OK")) {
+			g_app.uploading = false;
+			g_app.upload_result = 1;
+		} else if (!strcmp(kind, "ERR")) {
+			g_app.uploading = false;
+			g_app.upload_result = -1;
+			snprintf(g_app.upload_err, sizeof g_app.upload_err, "%s", n >= 3 ? f[2] : "failed");
+		}
+		break;
+
+	case RQ_VOICEGET:
+		if (!strcmp(kind, "ERR")) {
+			g_app.voice_loading = false;
+			char t[160];
+			snprintf(t, sizeof t, "Can't play this voice message: %s", n >= 3 ? f[2] : "error");
+			ui_show_toast(t, 5);
+		}
+		break;
+
 	case RQ_MEDIA:
 		if (!strcmp(kind, "ERR")) {
 			g_app.img_loading = false;
@@ -607,6 +707,16 @@ void client_on_bin(const char *tag, const char *kind, int w, int h, unsigned cha
 		return;
 	}
 	Pending *p = pending_get(tag);
+	if (p && p->type == RQ_VOICEGET) {
+		p->type = RQ_NONE;
+		bool wanted = g_app.voice_loading && !strcmp(g_app.voice_id, p->id) && !strcmp(g_app.cur_jid, p->jid);
+		g_app.voice_loading = false;
+		if (wanted && g_app.call_state != CALL_ACTIVE)
+			audio_clip_play(data, len); // takes ownership
+		else
+			free(data);
+		return;
+	}
 	if (p && p->type == RQ_MEDIA) {
 		p->type = RQ_NONE;
 		g_app.img_loading = false;

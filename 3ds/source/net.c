@@ -125,6 +125,8 @@ static int           conn_port;
 static unsigned char conn_fp[32];
 static char          conn_err[128];
 
+static void tx_free(void);
+
 static void tls_teardown(void)
 {
 	if (tls_ready) {
@@ -142,6 +144,7 @@ static void tls_teardown(void)
 	free(rx);
 	rx = NULL;
 	rx_len = rx_cap = 0;
+	tx_free();
 	free(bin);
 	bin = NULL;
 	bin_len = bin_got = 0;
@@ -356,37 +359,114 @@ static void append_escaped(char **buf, size_t *len, size_t *cap, const char *s)
 	}
 }
 
-static bool write_all(const unsigned char *p, size_t len)
+// ---------------------------------------------------------------- send queue
+// Every write goes through one ordered queue that is drained without blocking (here and in
+// net_poll), so large uploads don't freeze the UI and messages never interleave.
+
+static unsigned char *tx;
+static size_t tx_len, tx_off, tx_cap;
+static size_t tx_inflight;   // length passed to a write that returned WANT_*; must be repeated
+static size_t tx_mark_end;   // end offset of the upload being tracked for progress
+static size_t tx_mark_start;
+
+static bool tx_append(const void *p, size_t n)
 {
-	while (len > 0) {
-		int r = mbedtls_ssl_write(&ssl, p, len);
-		if (r == MBEDTLS_ERR_SSL_WANT_WRITE || r == MBEDTLS_ERR_SSL_WANT_READ) {
-			svcSleepThread(1000000); // 1 ms
-			continue;
-		}
-		if (r <= 0)
+	if (tx_off > 0 && tx_off == tx_len) // fully sent: reuse the buffer from the start
+		tx_off = tx_len = tx_mark_start = tx_mark_end = 0;
+	if (tx_len + n > tx_cap) {
+		size_t cap = tx_cap ? tx_cap : 16384;
+		while (cap < tx_len + n)
+			cap *= 2;
+		unsigned char *b = realloc(tx, cap);
+		if (!b)
 			return false;
-		p += r;
-		len -= r;
+		tx = b;
+		tx_cap = cap;
 	}
+	memcpy(tx + tx_len, p, n);
+	tx_len += n;
 	return true;
 }
 
-bool net_send(const char **fields, int nfields)
+static bool tx_flush(void)
 {
-	if (!tls_ready)
-		return false;
+	while (tx_off < tx_len) {
+		size_t n = tx_inflight ? tx_inflight : tx_len - tx_off;
+		if (n > 16384)
+			n = 16384;
+		int r = mbedtls_ssl_write(&ssl, tx + tx_off, n);
+		if (r == MBEDTLS_ERR_SSL_WANT_WRITE || r == MBEDTLS_ERR_SSL_WANT_READ) {
+			tx_inflight = n;
+			return true; // socket full; continue next frame
+		}
+		tx_inflight = 0;
+		if (r <= 0)
+			return false;
+		tx_off += r;
+	}
+	if (tx_off == tx_len) // everything sent: reset the buffer and the upload marks
+		tx_off = tx_len = tx_mark_start = tx_mark_end = 0;
+	return true;
+}
+
+static void tx_free(void)
+{
+	free(tx);
+	tx = NULL;
+	tx_len = tx_off = tx_cap = tx_inflight = tx_mark_start = tx_mark_end = 0;
+}
+
+static bool append_line(const char **fields, int nfields)
+{
 	char *buf = NULL;
 	size_t len = 0, cap = 0;
 	for (int i = 0; i < nfields; i++) {
 		append_escaped(&buf, &len, &cap, fields[i] ? fields[i] : "");
 		buf[len++] = i + 1 < nfields ? '\t' : '\n';
 	}
-	bool ok = write_all((unsigned char *)buf, len);
+	bool ok = tx_append(buf, len);
 	free(buf);
-	if (!ok)
-		net_close();
 	return ok;
+}
+
+static bool flush_or_close(void)
+{
+	if (!tx_flush()) {
+		net_close();
+		return false;
+	}
+	return true;
+}
+
+bool net_send(const char **fields, int nfields)
+{
+	if (!tls_ready || !append_line(fields, nfields))
+		return false;
+	return flush_or_close();
+}
+
+bool net_send_payload(const char **fields, int nfields, const unsigned char *data, size_t len)
+{
+	if (!tls_ready)
+		return false;
+	tx_mark_start = tx_len;
+	if (!append_line(fields, nfields) || !tx_append(data, len))
+		return false;
+	tx_mark_end = tx_len;
+	return flush_or_close();
+}
+
+bool net_upload_progress(size_t *sent, size_t *total)
+{
+	if (!tx_mark_end || tx_mark_end <= tx_mark_start) {
+		*sent = *total = 0;
+		return false;
+	}
+	*total = tx_mark_end - tx_mark_start;
+	*sent = tx_off > tx_mark_start ? tx_off - tx_mark_start : 0;
+	if (*sent > *total)
+		*sent = *total;
+	return *sent < *total;
 }
 
 static void unescape(char *s)
@@ -480,6 +560,8 @@ bool net_poll(LineHandler on_line, BinHandler on_bin)
 {
 	if (!tls_ready)
 		return false;
+	if (!flush_or_close())
+		return false;
 	for (int rounds = 0; rounds < 64; rounds++) {
 		if (rx_cap - rx_len < 4096) {
 			rx_cap = rx_cap ? rx_cap * 2 : 16384;
@@ -504,15 +586,14 @@ bool net_send_binary(const char *tag, const char *kind, const unsigned char *dat
 {
 	if (!tls_ready)
 		return false;
-	unsigned char buf[64 + 1024];
-	if (len > 1024)
+	// call audio is real-time: drop frames rather than queue behind a big upload
+	if (tx_len - tx_off > 32 * 1024)
+		return true;
+	char head[64];
+	int h = snprintf(head, sizeof head, "%s\t%s\t%u\n", tag, kind, (unsigned)len);
+	if (!tx_append(head, h) || !tx_append(data, len))
 		return false;
-	int h = snprintf((char *)buf, 64, "%s\t%s\t%u\n", tag, kind, (unsigned)len);
-	memcpy(buf + h, data, len);
-	bool ok = write_all(buf, h + len);
-	if (!ok)
-		net_close();
-	return ok;
+	return flush_or_close();
 }
 
 size_t net_bin_progress(size_t *total)

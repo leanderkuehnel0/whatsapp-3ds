@@ -277,11 +277,12 @@ func describe(msg *waE2E.Message) (kind, text string, hasMedia, ok bool) {
 		return "video", t, len(v.GetJPEGThumbnail()) > 0, true
 	case msg.GetAudioMessage() != nil:
 		a := msg.GetAudioMessage()
+		// voice notes and audio files can be played on the 3DS (Ogg/Opus only)
 		label := "Audio"
 		if a.GetPTT() {
 			label = "Voice message"
 		}
-		return "audio", "[" + label + " " + duration(a.GetSeconds()) + "]", false, true
+		return "audio", "[" + label + " " + duration(a.GetSeconds()) + "]", true, true
 	case msg.GetDocumentMessage() != nil:
 		d := msg.GetDocumentMessage()
 		name := d.GetFileName()
@@ -504,18 +505,7 @@ func (b *Bridge) SendText(ctx context.Context, chatJID, text string) (string, er
 	if err != nil {
 		return "", err
 	}
-	own := types.EmptyJID
-	if b.wa.Store.ID != nil {
-		own = b.wa.Store.ID.ToNonAD()
-	}
-	b.handleMessage(ctx, &events.Message{
-		Info: types.MessageInfo{
-			MessageSource: types.MessageSource{Chat: jid, Sender: own, IsFromMe: true, IsGroup: jid.Server == types.GroupServer},
-			ID:            resp.ID,
-			Timestamp:     resp.Timestamp,
-		},
-		Message: msg,
-	}, true)
+	b.recordSent(ctx, jid, resp, msg)
 	return resp.ID, nil
 }
 

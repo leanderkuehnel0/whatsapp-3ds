@@ -3,15 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
 	"os"
-	"path/filepath"
 	"sync"
 
 	_ "image/gif"
@@ -48,8 +45,7 @@ func (mc *MediaCache) Get(ctx context.Context, m Msg) (ScreenImage, error) {
 	if len(m.Media) == 0 {
 		return ScreenImage{}, errors.New("message has no media")
 	}
-	sum := sha256.Sum256([]byte(m.Chat + "\x00" + m.ID))
-	path := filepath.Join(mc.dir, hex.EncodeToString(sum[:16])+".jpg")
+	path := mc.path(m.Chat, m.ID, ".jpg")
 
 	mc.mu.Lock()
 	defer mc.mu.Unlock()

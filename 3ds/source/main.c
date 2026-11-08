@@ -232,28 +232,187 @@ static void leave_chat(void)
 	g_app.cur_jid[0] = 0;
 }
 
+static void open_camera(void)
+{
+	char err[96];
+	if (!cam_open(false, err, sizeof err)) {
+		ui_show_toast(err, 4);
+		return;
+	}
+	g_app.caption[0] = 0;
+	g_app.upload_result = 0;
+	g_app.screen = ST_CAMERA;
+}
+
+static void open_voice(void)
+{
+	if (g_app.call_state != CALL_NONE && g_app.call_state != CALL_ENDED) {
+		ui_show_toast("Can't record during a call", 3);
+		return;
+	}
+	if (!audio_available()) {
+		ui_show_toast("No sound: dump the DSP firmware with DSP1 first", 5);
+		return;
+	}
+	audio_clip_stop();
+	audio_record_discard();
+	g_app.upload_result = 0;
+	g_app.screen = ST_VOICE;
+}
+
 static void chat_action(int action)
 {
+	const Msg *m = (g_app.msg_sel >= 0 && g_app.msg_sel < g_app.nmsgs) ? &g_app.msgs[g_app.msg_sel] : NULL;
 	switch (action) {
 	case 0:
 		write_message();
 		break;
 	case 1:
-		if (g_app.msg_sel >= 0 && g_app.msg_sel < g_app.nmsgs && g_app.msgs[g_app.msg_sel].has_media)
-			client_request_image(&g_app.msgs[g_app.msg_sel]);
+		open_camera();
 		break;
 	case 2:
+		open_voice();
+		break;
+	case 3:
+		if (m && m->has_media) {
+			if (!strcmp(m->kind, "audio"))
+				client_play_voice(m);
+			else
+				client_request_image(m);
+		}
+		break;
+	case 4:
 		if (!g_app.cur_group)
 			client_call_start(g_app.cur_jid);
 		else
 			ui_show_toast("Group calls are not supported", 3);
 		break;
-	case 3:
+	case 5:
 		client_load_older();
 		break;
-	case 4:
+	case 6:
+		audio_clip_stop();
 		leave_chat();
 		break;
+	}
+}
+
+static void edit_caption(void)
+{
+	SwkbdState kb;
+	char buf[256];
+	swkbdInit(&kb, SWKBD_TYPE_NORMAL, 2, 200);
+	swkbdSetHintText(&kb, "Caption (optional)");
+	if (g_app.caption[0])
+		swkbdSetInitialText(&kb, g_app.caption);
+	swkbdSetFeatures(&kb, SWKBD_MULTILINE);
+	if (swkbdInputText(&kb, buf, sizeof buf) == SWKBD_BUTTON_CONFIRM)
+		strlcpy_utf8(g_app.caption, buf, sizeof g_app.caption);
+}
+
+static void input_camera(u32 down)
+{
+	if (g_app.upload_result > 0) { // sent
+		cam_close();
+		ui_show_toast("Photo sent", 3);
+		g_app.upload_result = 0;
+		g_app.screen = ST_CHAT;
+		return;
+	}
+	if (g_app.uploading)
+		return;
+	int b = -1;
+	if (down & KEY_TOUCH) {
+		touchPosition tp;
+		hidTouchRead(&tp);
+		b = ui_compose_button_at(tp.px, tp.py);
+	}
+	if (!cam_frozen()) {
+		if (down & KEY_A || b == 1) {
+			if (!cam_snap())
+				ui_show_toast("The camera isn't ready yet", 2);
+		} else if (down & KEY_X || b == 0) {
+			cam_switch();
+		} else if (down & KEY_B || b == 2) {
+			cam_close();
+			g_app.screen = ST_CHAT;
+		}
+		return;
+	}
+	if (down & KEY_A || b == 1) {
+		unsigned char *jpeg = NULL;
+		unsigned long len = 0;
+		if (!cam_jpeg(&jpeg, &len, 85)) {
+			ui_show_toast("Could not encode the photo", 3);
+			return;
+		}
+		client_send_image(jpeg, len, g_app.caption);
+		free(jpeg); // the send queue has its own copy
+	} else if (down & KEY_Y || b == 0) {
+		edit_caption();
+	} else if (down & KEY_B || b == 2) {
+		g_app.upload_result = 0;
+		cam_retake();
+	}
+}
+
+static void input_voice(u32 down)
+{
+	if (g_app.upload_result > 0) { // sent
+		audio_record_discard();
+		ui_show_toast("Voice message sent", 3);
+		g_app.upload_result = 0;
+		g_app.screen = ST_CHAT;
+		return;
+	}
+	if (g_app.uploading)
+		return;
+	int b = -1;
+	if (down & KEY_TOUCH) {
+		touchPosition tp;
+		hidTouchRead(&tp);
+		b = ui_compose_button_at(tp.px, tp.py);
+	}
+	size_t len;
+	const unsigned char *data = audio_record_data(&len);
+
+	if (audio_recording()) {
+		if (down & KEY_A || b == 1)
+			audio_record_stop();
+		else if (down & KEY_B || b == 2)
+			audio_record_discard();
+		return;
+	}
+	if (len > 0) {
+		if (down & KEY_A || b == 1) {
+			audio_clip_stop();
+			if (audio_record_ms() < 500)
+				ui_show_toast("Too short - hold on a bit longer", 3);
+			else
+				client_send_voice(data, len);
+		} else if (down & KEY_Y || b == 0) {
+			if (audio_clip_playing()) {
+				audio_clip_stop();
+			} else {
+				unsigned char *copy = malloc(len); // the player takes ownership
+				if (copy) {
+					memcpy(copy, data, len);
+					audio_clip_play(copy, len);
+				}
+			}
+		} else if (down & KEY_B || b == 2) {
+			audio_clip_stop();
+			audio_record_discard();
+			g_app.upload_result = 0;
+		}
+		return;
+	}
+	if (down & KEY_A || b == 1) {
+		g_app.upload_result = 0;
+		if (!audio_record_start())
+			ui_show_toast("Microphone unavailable", 3);
+	} else if (down & KEY_B || b == 2) {
+		g_app.screen = ST_CHAT;
 	}
 }
 
@@ -288,14 +447,18 @@ static void input_chat(u32 down, u32 repeat)
 
 	if (down & KEY_A)
 		chat_action(0);
-	else if (down & KEY_Y)
+	else if (down & KEY_R)
 		chat_action(1);
-	else if (down & KEY_X)
+	else if (down & KEY_SELECT)
 		chat_action(2);
-	else if (down & KEY_L)
+	else if (down & KEY_Y)
 		chat_action(3);
-	else if (down & KEY_B)
+	else if (down & KEY_X)
 		chat_action(4);
+	else if (down & KEY_L)
+		chat_action(5);
+	else if (down & KEY_B)
+		chat_action(6);
 	else if (down & KEY_TOUCH) {
 		touchPosition tp;
 		hidTouchRead(&tp);
@@ -429,7 +592,19 @@ int main(void)
 		case ST_CALL:
 			input_call(down);
 			break;
+		case ST_CAMERA:
+			input_camera(down);
+			break;
+		case ST_VOICE:
+			input_voice(down);
+			break;
 		}
+
+		// an incoming call takes over the camera/recorder: release the hardware
+		if (g_app.screen == ST_CALL)
+			cam_close(); // no-op when the camera is already off
+		if (g_app.screen == ST_CAMERA)
+			cam_update();
 
 		// networking
 		if (net_connecting()) {
@@ -472,6 +647,7 @@ int main(void)
 
 	if (g_app.call_state != CALL_NONE && g_app.call_state != CALL_ENDED)
 		client_call_hangup();
+	cam_close();
 	audio_exit();
 	net_exit();
 	ui_exit();

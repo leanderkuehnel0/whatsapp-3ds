@@ -13,6 +13,8 @@ The two talk over a TLS connection protected by a token. The console pins the br
 
 - 1:1 and group chats, with live updates pushed from the bridge
 - Sending text messages (multi-line)
+- Sending photos from the front or rear camera, with an optional caption
+- Recording, sending and playing voice messages (converted to/from WhatsApp's Ogg/Opus on the bridge, in pure Go)
 - Searching chats by name or phone number
 - Viewing photos, stickers and video thumbnails, which the bridge shrinks to fit the screen
 - Read receipts, unread counters, edits and deletions
@@ -91,8 +93,11 @@ The settings are saved in `sd:/3ds/wa3ds/config.ini`. You can also edit them the
 | Chat | D-Pad up/down | Select a message (going past the top loads older ones) |
 | | Circle Pad | Scroll |
 | | A | Write a message |
-| | Y | View the selected photo |
+| | Y | View the selected photo or play the selected voice message |
 | | X | Voice call (1:1 chats) |
+| | R | Take and send a photo (X switches front/rear camera) |
+| | SELECT | Record and send a voice message |
+| | Y on a voice message | Play / stop it |
 | | L | Load older messages |
 | | B | Back |
 | Call | A / B | Accept / decline an incoming call, B hangs up |

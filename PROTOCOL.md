@@ -12,7 +12,7 @@ certificate (DER), trusting it on first use, so no CA chain is involved.
 - Every client request starts with a short **tag** chosen by the client (e.g. `7`).
   Every response line for that request starts with the same tag.
 - Lines the server sends on its own (events) use the tag `*`.
-- Binary payloads: a `BIN` line announces the length in bytes, and exactly that many raw bytes follow right after its `\n`.
+- Binary payloads: a `BIN` or `AUD` line from the server, or an `AUD`, `IMG` or `VOICE` request from the client, has the payload length as its first argument, and exactly that many raw bytes follow right after its `\n`.
 
 ## Requests
 
@@ -25,6 +25,9 @@ certificate (DER), trusting it on first use, so no CA chain is involved.
 | `T SEND <chat jid> <text>` | `T OK <message id>`; the sent message is also broadcast as an event |
 | `T READ <chat jid>` | `T OK`; sends read receipts and clears the unread counter |
 | `T MEDIA <chat jid> <message id>` | `T BIN <length> <width> <height>` + JPEG bytes (fits within 400×240), or `T ERR <reason>` |
+| `T IMG <length> <chat jid> [caption]` + JPEG bytes | `T OK <message id>`; sends a photo (max 4 MB) |
+| `T VOICE <length> <chat jid>` + ADPCM frames | `T OK <message id>`; sends a voice note (16 kHz ADPCM frames as in calls, max 2 MB); the bridge converts it to Ogg/Opus |
+| `T VOICEGET <chat jid> <message id>` | `T BIN <length> <duration ms> 0` + 16 kHz ADPCM frames of a voice/audio message (cut at 5 minutes), or `T ERR <reason>` |
 | `T CALL <chat jid>` | `T OK <call id>`; starts an outgoing voice call (1:1 chats only) |
 | `T ACCEPT <call id>` | `T OK`; answers a ringing incoming call |
 | `T HANGUP <call id>` | `T OK`; declines a ringing incoming call, or ends the call |
@@ -37,6 +40,7 @@ certificate (DER), trusting it on first use, so no CA chain is involved.
 `<msg>` = `chat_jid  msg_id  ts  from_me(0/1)  sender_name  kind  has_media(0/1)  text`
 
 `kind` is one of `text`, `image`, `sticker`, `video`, `audio`, `document`, `other`, `deleted`.
+`has_media` means `MEDIA` (images, stickers, video thumbnails) or `VOICEGET` (audio) can fetch it.
 Timestamps are Unix seconds.
 
 ## Events (tag `*`)

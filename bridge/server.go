@@ -197,6 +197,39 @@ const (
 	maxAudioFrame = 4096
 )
 
+// binaryCommands lists requests that carry a payload, with their size limits.
+var binaryCommands = map[string]int{
+	"AUD":   maxAudioFrame,
+	"IMG":   maxImageUpload,
+	"VOICE": maxVoiceUpload,
+}
+
+// dispatchUpload handles IMG and VOICE requests once their payload has been read.
+func (s *Server) dispatchUpload(c *Conn, tag, cmd string, args []string, payload []byte) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	if len(args) < 1 {
+		return c.writeLines(line(tag, "ERR", "missing chat"))
+	}
+	var id string
+	var err error
+	switch cmd {
+	case "IMG":
+		caption := ""
+		if len(args) > 1 {
+			caption = args[1]
+		}
+		id, err = s.bridge.SendImage(ctx, args[0], payload, caption)
+	case "VOICE":
+		id, err = s.bridge.SendVoice(ctx, args[0], payload)
+	}
+	if err != nil {
+		log.Printf("%s to %s failed: %v", cmd, args[0], err)
+		return c.writeLines(line(tag, "ERR", err.Error()))
+	}
+	return c.writeLines(line(tag, "OK", id))
+}
+
 func firstArg(a []string) string {
 	if len(a) == 0 {
 		return ""
@@ -241,17 +274,28 @@ func (s *Server) handle(nc net.Conn) {
 		}
 		tag, cmd, args := f[0], f[1], f[2:]
 
-		if cmd == "AUD" && authed {
-			// microphone frame: "<tag> AUD <len>" followed by len bytes, no reply
+		// Requests followed by a binary payload: "<tag> <CMD> <len> ..." + len bytes.
+		if limit, ok := binaryCommands[cmd]; ok && authed {
 			n, err := strconv.Atoi(firstArg(args))
-			if err != nil || n <= 0 || n > maxAudioFrame {
+			if err != nil || n <= 0 || n > limit {
+				log.Printf("client %s: bad %s length %q", remote, cmd, firstArg(args))
 				return
 			}
-			frame := make([]byte, n)
-			if _, err := io.ReadFull(r, frame); err != nil {
+			_ = nc.SetReadDeadline(time.Now().Add(idleTimeout + time.Duration(n/2048)*time.Second))
+			payload := make([]byte, n)
+			if _, err := io.ReadFull(r, payload); err != nil {
 				return
 			}
-			s.bridge.calls.FeedMicAudio(frame)
+			if cmd == "AUD" {
+				s.bridge.calls.FeedMicAudio(payload) // call audio: no reply
+				continue
+			}
+			// uploads can take a while; don't block reading the next requests
+			go func(tag, cmd string, args []string, payload []byte) {
+				if err := s.dispatchUpload(c, tag, cmd, args, payload); err != nil {
+					c.close()
+				}
+			}(tag, cmd, args[1:], payload)
 			continue
 		}
 
@@ -378,6 +422,22 @@ func (s *Server) dispatch(c *Conn, tag, cmd string, args []string) error {
 			return errLine(err)
 		}
 		return c.writeBinary(line(tag, "BIN", strconv.Itoa(len(img.JPEG)), strconv.Itoa(img.W), strconv.Itoa(img.H)), img.JPEG)
+
+	case "VOICEGET":
+		if len(args) < 2 {
+			return errLine(fmt.Errorf("usage: VOICEGET jid id"))
+		}
+		m, err := b.store.GetMessage(ctx, args[0], args[1])
+		if err != nil {
+			return errLine(fmt.Errorf("message not found"))
+		}
+		frames, err := b.media.Voice(ctx, m)
+		if err != nil {
+			log.Printf("voice %s/%s: %v", args[0], args[1], err)
+			return errLine(err)
+		}
+		ms := len(frames) / adpcmFrameBytes * voiceFrameMS
+		return c.writeBinary(line(tag, "BIN", strconv.Itoa(len(frames)), strconv.Itoa(ms), "0"), frames)
 
 	case "CALL":
 		if len(args) < 1 {

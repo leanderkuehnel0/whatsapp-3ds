@@ -1,4 +1,5 @@
-// Call audio: microphone capture (MIC service) and playback/ringtones (DSP via ndsp).
+// Audio: microphone capture (calls and voice-message recording), call playback, ringtones,
+// and a streaming player for voice messages. Uses the MIC service and the DSP via ndsp.
 #include "app.h"
 
 #include <malloc.h>
@@ -8,6 +9,7 @@
 
 #define CH_VOICE 0
 #define CH_RING  1
+#define CH_CLIP  2
 
 // playback ring of 20 ms buffers
 #define NBUF        16
@@ -32,6 +34,27 @@ static s16   frame[CALL_FRAME];
 static int   frame_n;
 static AdpcmState enc;
 static float level;
+
+typedef enum { MIC_OFF, MIC_CALL, MIC_RECORD } MicMode;
+static MicMode mic_mode;
+
+// voice-message recording: ADPCM frames, same format the bridge accepts
+#define REC_MAX_FRAMES (120 * 1000 / 20) // 2 minutes
+static unsigned char *rec;
+static size_t rec_len, rec_cap;
+static AdpcmState rec_enc;
+
+// voice-message player: decodes ADPCM frames into a few rotating half-second buffers
+#define CLIP_BUFS       4
+#define CLIP_BUF_FRAMES 25
+#define CLIP_BUF_SAMPLES (CLIP_BUF_FRAMES * CALL_FRAME)
+static ndspWaveBuf cbuf[CLIP_BUFS];
+static s16        *cdata;
+static unsigned char *clip;      // owned
+static size_t      clip_frames, clip_next;
+static size_t      clip_played;  // samples in buffers that finished playing
+static bool        clip_queued[CLIP_BUFS];
+static bool        clip_on;
 
 bool audio_available(void) { return dsp_ok; }
 
@@ -82,9 +105,16 @@ bool audio_init(void)
 		wbuf[i].data_vaddr = wdata + i * CALL_FRAME;
 		wbuf[i].status = NDSP_WBUF_DONE;
 	}
+	cdata = linearAlloc(CLIP_BUFS * CLIP_BUF_SAMPLES * sizeof(s16));
+	memset(cbuf, 0, sizeof cbuf);
+	for (int i = 0; i < CLIP_BUFS && cdata; i++) {
+		cbuf[i].data_vaddr = cdata + i * CLIP_BUF_SAMPLES;
+		cbuf[i].status = NDSP_WBUF_DONE;
+	}
 	make_ringtone();
 	setup_channel(CH_VOICE, 1.0f);
 	setup_channel(CH_RING, 0.8f);
+	setup_channel(CH_CLIP, 1.0f);
 	dsp_ok = true;
 	return true;
 }
@@ -92,12 +122,17 @@ bool audio_init(void)
 void audio_exit(void)
 {
 	audio_call_end();
+	audio_record_discard();
+	audio_clip_stop();
 	if (!dsp_ok)
 		return;
 	ndspChnWaveBufClear(CH_VOICE);
 	ndspChnWaveBufClear(CH_RING);
+	ndspChnWaveBufClear(CH_CLIP);
 	ndspExit();
 	linearFree(wdata);
+	if (cdata)
+		linearFree(cdata);
 	if (ringdata)
 		linearFree(ringdata);
 	dsp_ok = false;
@@ -118,11 +153,10 @@ void audio_ring(int kind)
 	}
 }
 
-bool audio_call_begin(void)
+static bool mic_start(MicMode mode)
 {
-	audio_ring(0);
 	if (mic_on)
-		return true;
+		return mic_mode == mode;
 	micbuf = memalign(0x1000, MIC_BUF_SIZE);
 	if (!micbuf)
 		return false;
@@ -144,15 +178,13 @@ bool audio_call_begin(void)
 	mic_prev = 0;
 	frame_n = 0;
 	memset(&enc, 0, sizeof enc);
+	mic_mode = mode;
 	mic_on = true;
 	return true;
 }
 
-void audio_call_end(void)
+static void mic_stop(void)
 {
-	audio_ring(0);
-	if (dsp_ok)
-		ndspChnWaveBufClear(CH_VOICE);
 	if (mic_on) {
 		MICU_StopSampling();
 		micExit();
@@ -160,7 +192,163 @@ void audio_call_end(void)
 		micbuf = NULL;
 		mic_on = false;
 	}
+	mic_mode = MIC_OFF;
 	level = 0;
+}
+
+bool audio_call_begin(void)
+{
+	audio_ring(0);
+	audio_clip_stop();
+	if (mic_on && mic_mode == MIC_RECORD)
+		audio_record_discard(); // an incoming call wins over a half-done recording
+	return mic_start(MIC_CALL);
+}
+
+void audio_call_end(void)
+{
+	audio_ring(0);
+	if (dsp_ok)
+		ndspChnWaveBufClear(CH_VOICE);
+	if (mic_mode == MIC_CALL)
+		mic_stop();
+}
+
+// ---------------------------------------------------------------- recording
+
+bool audio_record_start(void)
+{
+	if (mic_on)
+		return false; // in a call
+	audio_clip_stop();
+	free(rec);
+	rec_cap = 64 * 1024;
+	rec = malloc(rec_cap);
+	rec_len = 0;
+	memset(&rec_enc, 0, sizeof rec_enc);
+	if (!rec || !mic_start(MIC_RECORD)) {
+		free(rec);
+		rec = NULL;
+		return false;
+	}
+	return true;
+}
+
+bool audio_recording(void) { return mic_on && mic_mode == MIC_RECORD; }
+
+void audio_record_stop(void)
+{
+	if (mic_mode == MIC_RECORD)
+		mic_stop();
+}
+
+const unsigned char *audio_record_data(size_t *len)
+{
+	*len = rec_len;
+	return rec;
+}
+
+u32 audio_record_ms(void) { return (u32)(rec_len / (4 + CALL_FRAME / 2)) * 20; }
+
+void audio_record_discard(void)
+{
+	audio_record_stop();
+	free(rec);
+	rec = NULL;
+	rec_len = rec_cap = 0;
+}
+
+static void record_frame(void)
+{
+	const size_t fb = 4 + CALL_FRAME / 2;
+	if (rec_len / fb >= REC_MAX_FRAMES) {
+		mic_stop(); // limit reached: stop, keep what we have
+		return;
+	}
+	if (rec_len + fb > rec_cap) {
+		size_t cap = rec_cap * 2;
+		unsigned char *n = realloc(rec, cap);
+		if (!n) {
+			mic_stop();
+			return;
+		}
+		rec = n;
+		rec_cap = cap;
+	}
+	rec_len += adpcm_encode(&rec_enc, frame, CALL_FRAME, rec + rec_len);
+}
+
+// ---------------------------------------------------------------- voice message player
+
+void audio_clip_stop(void)
+{
+	if (dsp_ok)
+		ndspChnWaveBufClear(CH_CLIP);
+	free(clip);
+	clip = NULL;
+	clip_on = false;
+	clip_frames = clip_next = clip_played = 0;
+	memset(clip_queued, 0, sizeof clip_queued);
+}
+
+bool audio_clip_play(unsigned char *data, size_t len)
+{
+	audio_clip_stop();
+	const size_t fb = 4 + CALL_FRAME / 2;
+	if (!dsp_ok || !cdata || len < fb) {
+		free(data);
+		return false;
+	}
+	clip = data;
+	clip_frames = len / fb;
+	clip_on = true;
+	return true;
+}
+
+bool audio_clip_playing(void) { return clip_on; }
+
+void audio_clip_progress(u32 *pos_ms, u32 *total_ms)
+{
+	u32 pos = clip_played + (clip_on ? ndspChnGetSamplePos(CH_CLIP) : 0);
+	*pos_ms = pos / (CALL_RATE / 1000);
+	*total_ms = clip_frames * 20;
+	if (*pos_ms > *total_ms)
+		*pos_ms = *total_ms;
+}
+
+static void clip_update(void)
+{
+	if (!clip_on)
+		return;
+	const size_t fb = 4 + CALL_FRAME / 2;
+	bool busy = false;
+	for (int i = 0; i < CLIP_BUFS; i++) {
+		ndspWaveBuf *b = &cbuf[i];
+		if (b->status == NDSP_WBUF_QUEUED || b->status == NDSP_WBUF_PLAYING) {
+			busy = true;
+			continue;
+		}
+		if (clip_queued[i]) { // this buffer just finished
+			clip_played += b->nsamples;
+			clip_queued[i] = false;
+		}
+		if (clip_next >= clip_frames)
+			continue;
+		s16 *dst = (s16 *)b->data_vaddr;
+		int n = 0;
+		while (n < CLIP_BUF_SAMPLES && clip_next < clip_frames) {
+			n += adpcm_decode(clip + clip_next * fb, fb, dst + n, CLIP_BUF_SAMPLES - n);
+			clip_next++;
+		}
+		b->nsamples = n;
+		b->looping = false;
+		DSP_FlushDataCache(dst, n * sizeof(s16));
+		ndspChnWaveBufAdd(CH_CLIP, b);
+		clip_queued[i] = true;
+		busy = true;
+	}
+	if (!busy && clip_next >= clip_frames)
+		audio_clip_stop(); // finished
 }
 
 float audio_mic_level(void) { return level; }
@@ -177,6 +365,10 @@ static void send_frame(void)
 	float l = peak / 32768.0f;
 	level = l > level ? l : level * 0.85f;
 
+	if (mic_mode == MIC_RECORD) {
+		record_frame();
+		return;
+	}
 	if (g_app.call_muted || g_app.call_state != CALL_ACTIVE)
 		return;
 	unsigned char out[4 + CALL_FRAME / 2];
@@ -203,13 +395,14 @@ static void push_mic_sample(s16 s)
 
 void audio_update(void)
 {
+	clip_update();
 	if (!mic_on)
 		return;
 	u32 pos = micGetLastSampleOffset();
 	if (pos >= mic_datasize)
 		return;
 	int guard = 0;
-	while (mic_pos != pos && guard++ < 16384) {
+	while (mic_on && mic_pos != pos && guard++ < 16384) {
 		s16 s = *(s16 *)(micbuf + mic_pos);
 		mic_pos += 2;
 		if (mic_pos >= mic_datasize)

@@ -28,6 +28,7 @@ static CFNT_s *font;
 #define COL_BTN       C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF)
 #define COL_BTN_OFF   C2D_Color32(0xF2, 0xF2, 0xF2, 0xFF)
 #define COL_BLACK     C2D_Color32(0x00, 0x00, 0x00, 0xFF)
+#define COL_CALL_BG   C2D_Color32(0x0B, 0x14, 0x1A, 0xFF)
 
 #define BOT_HEADER_H 24
 #define ROW_H        44
@@ -326,7 +327,7 @@ static void draw_conversation(void)
 		text(m->wrapped, x + 6, ty, MSG_SCALE, deleted ? COL_MUTED : COL_TEXT, 0);
 		text(tbuf_time, x + bw - 6, y + m->h - 14, 0.4f, COL_MUTED, C2D_AlignRight);
 		if (m->has_media)
-			text("Y: view", x + 6, y + m->h - 14, 0.4f, COL_SENDER, 0);
+			text(!strcmp(m->kind, "audio") ? "Y: play" : "Y: view", x + 6, y + m->h - 14, 0.4f, COL_SENDER, 0);
 	}
 
 	if (g_app.nmsgs == 0)
@@ -335,7 +336,18 @@ static void draw_conversation(void)
 		text("Loading older messages...", TOP_W / 2, HEADER_H + 2, 0.4f, COL_MUTED, C2D_AlignCenter);
 	(void)vh;
 
-	header(g_app.cur_name, TOP_W, HEADER_H, status_label());
+	char play[48];
+	const char *right = status_label();
+	if (g_app.voice_loading) {
+		right = "Loading voice message...";
+	} else if (audio_clip_playing()) {
+		u32 pos, total;
+		audio_clip_progress(&pos, &total);
+		snprintf(play, sizeof play, "Playing %u:%02u / %u:%02u", (unsigned)(pos / 60000), (unsigned)(pos / 1000 % 60),
+		         (unsigned)(total / 60000), (unsigned)(total / 1000 % 60));
+		right = play;
+	}
+	header(g_app.cur_name, TOP_W, HEADER_H, right);
 	draw_toast();
 }
 
@@ -498,26 +510,21 @@ static void draw_bot_chats(void)
 	}
 }
 
-static const char *btn_labels[5] = {"Write (A)", "Image (Y)", "Call (X)", "Older (L)", "Back (B)"};
+// chat buttons: label and key hint, two rows of four
+static const char *btn_labels[7] = {"Write", "Photo", "Voice", "View", "Call", "Older", "Back"};
+static const char *btn_keys[7] = {"A", "R", "SELECT", "Y", "X", "L", "B"};
 
-// top row: write, image, call; bottom row: older, back
 static void btn_rect(int i, float *x, float *y, float *w, float *h)
 {
+	*w = 74;
 	*h = 60;
-	if (i < 3) {
-		*w = 98;
-		*x = 8 + i * 103;
-		*y = 104;
-	} else {
-		*w = 150;
-		*x = 8 + (i - 3) * 154;
-		*y = 170;
-	}
+	*x = 6 + (i % 4) * 78;
+	*y = (i < 4) ? 104 : 170;
 }
 
 int ui_chat_button_at(int x, int y)
 {
-	for (int i = 0; i < 5; i++) {
+	for (int i = 0; i < 7; i++) {
 		float bx, by, bw, bh;
 		btn_rect(i, &bx, &by, &bw, &bh);
 		if (x >= bx && x < bx + bw && y >= by && y < by + bh)
@@ -526,9 +533,21 @@ int ui_chat_button_at(int x, int y)
 	return -1;
 }
 
+static const Msg *selected_msg(void)
+{
+	return g_app.msg_sel >= 0 && g_app.msg_sel < g_app.nmsgs ? &g_app.msgs[g_app.msg_sel] : NULL;
+}
+
 static bool selected_has_media(void)
 {
-	return g_app.msg_sel >= 0 && g_app.msg_sel < g_app.nmsgs && g_app.msgs[g_app.msg_sel].has_media;
+	const Msg *m = selected_msg();
+	return m && m->has_media;
+}
+
+static bool selected_is_audio(void)
+{
+	const Msg *m = selected_msg();
+	return m && m->has_media && !strcmp(m->kind, "audio");
 }
 
 static void draw_bot_chat(void)
@@ -551,19 +570,27 @@ static void draw_bot_chat(void)
 	}
 	text("D-Pad: select   Circle Pad: scroll", BOT_W / 2, 78, 0.4f, COL_MUTED, C2D_AlignCenter);
 
-	for (int i = 0; i < 5; i++) {
+	for (int i = 0; i < 7; i++) {
 		float x, y, w, h;
 		btn_rect(i, &x, &y, &w, &h);
 		bool enabled = true;
-		if (i == 1)
+		const char *label = btn_labels[i];
+		if (i == 3) {
 			enabled = selected_has_media();
-		if (i == 2)
+			if (selected_is_audio()) {
+				const Msg *m = selected_msg();
+				bool mine = !strcmp(g_app.voice_id, m->id) && (audio_clip_playing() || g_app.voice_loading);
+				label = mine ? "Stop" : "Play";
+			}
+		}
+		if (i == 4)
 			enabled = !g_app.cur_group;
-		if (i == 3 && g_app.no_older)
+		if (i == 5 && g_app.no_older)
 			enabled = false;
 		rect(x, y, w, h, enabled ? COL_BTN : COL_BTN_OFF);
 		rect(x, y + h - 3, w, 3, enabled ? COL_ACCENT : COL_LINE);
-		text(btn_labels[i], x + w / 2, y + h / 2 - 9, 0.5f, enabled ? COL_TEXT : COL_MUTED, C2D_AlignCenter);
+		text(label, x + w / 2, y + 12, 0.5f, enabled ? COL_TEXT : COL_MUTED, C2D_AlignCenter);
+		text(btn_keys[i], x + w / 2, y + 34, 0.38f, COL_MUTED, C2D_AlignCenter);
 	}
 }
 
@@ -588,9 +615,172 @@ static void draw_bot_hints(void)
 	text(h, BOT_W / 2, 90, 0.5f, COL_TEXT, C2D_AlignCenter);
 }
 
+// ---------------------------------------------------------------- photo / voice screens
+
+static void compose_btn_rect(int i, float *x, float *y, float *w, float *h)
+{
+	*w = 98;
+	*h = 70;
+	*x = 6 + i * 104;
+	*y = 160;
+}
+
+int ui_compose_button_at(int x, int y)
+{
+	for (int i = 0; i < 3; i++) {
+		float bx, by, bw, bh;
+		compose_btn_rect(i, &bx, &by, &bw, &bh);
+		if (x >= bx && x < bx + bw && y >= by && y < by + bh)
+			return i;
+	}
+	return -1;
+}
+
+// labels: NULL hides a button; the middle one is the primary action
+static void draw_compose_buttons(const char *l, const char *lk, const char *m, const char *mk, const char *r, const char *rk)
+{
+	const char *labels[3] = {l, m, r}, *keys[3] = {lk, mk, rk};
+	for (int i = 0; i < 3; i++) {
+		if (!labels[i])
+			continue;
+		float x, y, w, h;
+		compose_btn_rect(i, &x, &y, &w, &h);
+		rect(x, y, w, h, i == 1 ? COL_ACCENT : COL_BTN);
+		text(labels[i], x + w / 2, y + 16, 0.52f, i == 1 ? COL_WHITE : COL_TEXT, C2D_AlignCenter);
+		text(keys[i], x + w / 2, y + 42, 0.4f, i == 1 ? COL_WHITE : COL_MUTED, C2D_AlignCenter);
+	}
+}
+
+static void draw_upload_status(float y)
+{
+	size_t sent, total;
+	if (net_upload_progress(&sent, &total) && total) {
+		char t[64];
+		snprintf(t, sizeof t, "Uploading %u%%", (unsigned)(sent * 100 / total));
+		text(t, BOT_W / 2, y, 0.5f, COL_TEXT, C2D_AlignCenter);
+		rect(40, y + 22, BOT_W - 80, 6, COL_LINE);
+		rect(40, y + 22, (BOT_W - 80) * (float)sent / total, 6, COL_ACCENT);
+	} else {
+		text("Sending to WhatsApp...", BOT_W / 2, y, 0.5f, COL_TEXT, C2D_AlignCenter);
+	}
+}
+
+static void draw_camera(void)
+{
+	C2D_TargetClear(top, COL_BLACK);
+	C2D_SceneBegin(top);
+	C2D_TextBufClear(tbuf);
+	if (cam_has_frame())
+		cam_draw((TOP_W - 320) / 2, 0);
+	else
+		text("Starting camera...", TOP_W / 2, 110, 0.5f, COL_WHITE, C2D_AlignCenter);
+	draw_toast();
+
+	C2D_TargetClear(bot, COL_BG);
+	C2D_SceneBegin(bot);
+	C2D_TextBufClear(tbuf);
+	char title[128];
+	snprintf(title, sizeof title, "Photo to %s", g_app.cur_name);
+	header(title, BOT_W, BOT_HEADER_H, NULL);
+
+	if (g_app.uploading) {
+		draw_upload_status(90);
+		return;
+	}
+	if (!cam_frozen()) {
+		text(cam_is_front() ? "Front camera" : "Rear camera", BOT_W / 2, 50, 0.5f, COL_TEXT, C2D_AlignCenter);
+		draw_compose_buttons("Switch", "X", "Take photo", "A", "Back", "B");
+		return;
+	}
+	if (g_app.caption[0]) {
+		int lines;
+		char *w = ui_wrap(g_app.caption, BOT_W - 24, 0.45f, &lines, NULL);
+		text(w, 12, 36, 0.45f, COL_TEXT, 0);
+		free(w);
+	} else {
+		text("No caption", BOT_W / 2, 50, 0.45f, COL_MUTED, C2D_AlignCenter);
+	}
+	if (g_app.upload_result < 0) {
+		char t[140];
+		snprintf(t, sizeof t, "Not sent: %s", g_app.upload_err);
+		text_fit(t, 12, 130, BOT_W - 24, 0.42f, COL_WARN);
+	}
+	draw_compose_buttons("Caption", "Y", "Send", "A", "Retake", "B");
+}
+
+static void fmt_dur(u32 ms, char *out, size_t n)
+{
+	snprintf(out, n, "%u:%02u", (unsigned)(ms / 60000), (unsigned)(ms / 1000 % 60));
+}
+
+static void draw_voice(void)
+{
+	size_t len;
+	audio_record_data(&len);
+	bool recording = audio_recording(), have = len > 0;
+
+	C2D_TargetClear(top, COL_CALL_BG);
+	C2D_SceneBegin(top);
+	C2D_TextBufClear(tbuf);
+	// microphone glyph
+	u32 mic = recording ? C2D_Color32(0xE5, 0x39, 0x35, 0xFF) : COL_ACCENT;
+	C2D_DrawCircleSolid(TOP_W / 2, 70, 0.5f, 36, mic);
+	rect(TOP_W / 2 - 9, 48, 18, 30, COL_WHITE);
+	C2D_DrawCircleSolid(TOP_W / 2, 48, 0.5f, 9, COL_WHITE);
+	C2D_DrawCircleSolid(TOP_W / 2, 78, 0.5f, 9, COL_WHITE);
+	rect(TOP_W / 2 - 2, 87, 4, 8, COL_WHITE);
+
+	char t[64], d[16];
+	if (recording) {
+		fmt_dur(audio_record_ms(), d, sizeof d);
+		snprintf(t, sizeof t, "Recording  %s / 2:00", d);
+		text(t, TOP_W / 2, 122, 0.6f, COL_WHITE, C2D_AlignCenter);
+		float l = audio_mic_level();
+		rect(110, 156, 180, 6, C2D_Color32(0x26, 0x32, 0x38, 0xFF));
+		rect(110, 156, 180 * (l > 1 ? 1 : l), 6, COL_ACCENT);
+	} else if (have) {
+		fmt_dur(audio_record_ms(), d, sizeof d);
+		if (audio_clip_playing()) {
+			u32 pos, total;
+			char p[16];
+			audio_clip_progress(&pos, &total);
+			fmt_dur(pos, p, sizeof p);
+			snprintf(t, sizeof t, "Playing %s / %s", p, d);
+		} else {
+			snprintf(t, sizeof t, "Voice message  %s", d);
+		}
+		text(t, TOP_W / 2, 122, 0.6f, COL_WHITE, C2D_AlignCenter);
+	} else {
+		text("Voice message", TOP_W / 2, 122, 0.6f, COL_WHITE, C2D_AlignCenter);
+		text("Press A to start recording", TOP_W / 2, 150, 0.45f, COL_MUTED, C2D_AlignCenter);
+	}
+	draw_toast();
+
+	C2D_TargetClear(bot, COL_BG);
+	C2D_SceneBegin(bot);
+	C2D_TextBufClear(tbuf);
+	char title[128];
+	snprintf(title, sizeof title, "Voice message to %s", g_app.cur_name);
+	header(title, BOT_W, BOT_HEADER_H, NULL);
+	if (g_app.uploading) {
+		draw_upload_status(90);
+		return;
+	}
+	if (g_app.upload_result < 0) {
+		char e[140];
+		snprintf(e, sizeof e, "Not sent: %s", g_app.upload_err);
+		text_fit(e, 12, 120, BOT_W - 24, 0.42f, COL_WARN);
+	}
+	if (recording)
+		draw_compose_buttons(NULL, NULL, "Stop", "A", "Cancel", "B");
+	else if (have)
+		draw_compose_buttons(audio_clip_playing() ? "Stop" : "Listen", "Y", "Send", "A", "Delete", "B");
+	else
+		draw_compose_buttons(NULL, NULL, "Record", "A", "Back", "B");
+}
+
 // ---------------------------------------------------------------- call screen
 
-#define COL_CALL_BG  C2D_Color32(0x0B, 0x14, 0x1A, 0xFF)
 #define COL_RED      C2D_Color32(0xE5, 0x39, 0x35, 0xFF)
 
 static void call_status(char *out, size_t n)
@@ -740,6 +930,12 @@ void ui_render(void)
 	case ST_CALL:
 		draw_top_call();
 		draw_bot_call();
+		break;
+	case ST_CAMERA:
+		draw_camera();
+		break;
+	case ST_VOICE:
+		draw_voice();
 		break;
 	default:
 		draw_top_message_screen();

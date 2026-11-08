@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"net"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -300,5 +301,51 @@ func TestMergeChat(t *testing.T) {
 	msgs, _ := b.store.Messages(ctx, pn, 0, 10)
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages after merge, got %d", len(msgs))
+	}
+}
+
+func TestMediaUploadFraming(t *testing.T) {
+	addr, b, token := newTestServer(t)
+	ctx := context.Background()
+	chat := "491701234567@s.whatsapp.net"
+	_ = b.store.EnsureChat(ctx, chat, "Alice", false)
+	_ = b.store.PutMessage(ctx, Msg{Chat: chat, ID: "t1", TS: 1, Kind: "text", Text: "hi"}, "hi", false)
+
+	c := dial(t, addr)
+	c.send("1", "AUTH", token)
+	c.recvUntil("1", "OK")
+
+	send := func(tag, cmd string, payload []byte, args ...string) {
+		t.Helper()
+		head := line(append([]string{tag, cmd, strconv.Itoa(len(payload))}, args...)...) + "\n"
+		if _, err := c.c.Write(append([]byte(head), payload...)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// not a JPEG: rejected before anything is uploaded
+	send("2", "IMG", []byte("definitely not a jpeg"), chat, "caption\twith tab")
+	if f := c.recvUntil("2", "ERR"); !strings.Contains(f[len(f)-1][2], "JPEG") {
+		t.Fatalf("img: %q", f)
+	}
+	// voice data that isn't whole ADPCM frames
+	send("3", "VOICE", make([]byte, 100), chat)
+	if f := c.recvUntil("3", "ERR"); !strings.Contains(f[len(f)-1][2], "multiple") {
+		t.Fatalf("voice: %q", f)
+	}
+	// asking for the audio of a text message
+	c.send("4", "VOICEGET", chat, "t1")
+	c.recvUntil("4", "ERR")
+	// the stream is still in sync after the binary payloads
+	c.send("5", "PING")
+	c.recvUntil("5", "OK")
+
+	// an oversized upload closes the connection instead of allocating it
+	c.send("6", "IMG", strconv.Itoa(maxImageUpload+1), chat)
+	_ = c.c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for {
+		if _, err := c.r.ReadString('\n'); err != nil {
+			break
+		}
 	}
 }
