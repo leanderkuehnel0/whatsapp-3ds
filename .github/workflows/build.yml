@@ -86,6 +86,19 @@ jobs:
           ls -l wa3ds.cia
           test -s wa3ds.cia
 
+      - name: Check .cia contents
+        working-directory: 3ds
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/ctrtool.zip" https://github.com/3DSGuy/Project_CTR/releases/download/ctrtool-v1.3.0/ctrtool-v1.3.0-ubuntu_x86_64.zip
+          unzip -q -o "$RUNNER_TEMP/ctrtool.zip" -d "$RUNNER_TEMP/tools" && chmod +x "$RUNNER_TEMP/tools/ctrtool"
+          ctrtool -i wa3ds.cia > cia-info.txt 2>&1 || true
+          grep -iE "title ?id|product ?code|program ?id|version" cia-info.txt | head -12
+          for svc in ps:ps mic:u dsp::DSP soc:U fs:USER; do
+            grep -q "$svc" cia-info.txt || { echo "::error::service $svc missing from .cia"; exit 1; }
+          done
+          grep -qi "000400000f3da500" cia-info.txt || { echo "::error::unexpected title ID"; exit 1; }
+          echo "services and title ID OK"
+
       - uses: actions/upload-artifact@v5
         with:
           name: wa3ds-cia
