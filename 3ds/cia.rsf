@@ -16,8 +16,7 @@ Option:
   FreeProductCode         : true
   MediaFootPadding        : false
   EnableCrypt             : false
-  # Compressed code crashed Luma's loader while unpacking it (crash in its LZ decompressor),
-  # so the code is stored uncompressed; it only makes the .cia slightly larger.
+  # Stored uncompressed; it only makes the .cia slightly larger.
   EnableCompress          : false
 
 AccessControlInfo:
@@ -26,6 +25,9 @@ AccessControlInfo:
   ReleaseKernelMajor            : "02"
   ReleaseKernelMinor            : "33"
   UseExtSaveData                : false
+  # Required: Luma's loader refuses to start a title without a memory region
+  # (it panics in LoadProcessImpl when the kernel-flags descriptor has region 0).
+  MemoryType                    : Application
   FileSystemAccess:
     - DirectSdmc
     - DirectSdmcWrite

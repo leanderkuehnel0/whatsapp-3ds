@@ -104,6 +104,10 @@ jobs:
           echo "exheader flags: 0x$flags"
           test -n "$flags" || { echo "::error::could not read exheader flags"; exit 1; }
           if (( 0x$flags & 1 )); then echo "::error::.cia code is compressed"; exit 1; fi
+          # Luma's loader panics if the kernel flags carry no memory region (MemoryType in cia.rsf)
+          grep -n -A8 -iE "^Kernel flags" cia-info.txt | head -12
+          grep -qiE "memory ?(type|region)[^:]*: *app" cia-info.txt \
+            || { echo "::error::.cia has no APPLICATION memory type"; exit 1; }
 
       - uses: actions/upload-artifact@v5
         with:
