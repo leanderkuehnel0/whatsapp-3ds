@@ -16,7 +16,9 @@ Option:
   FreeProductCode         : true
   MediaFootPadding        : false
   EnableCrypt             : false
-  EnableCompress          : true
+  # Compressed code crashed Luma's loader while unpacking it (crash in its LZ decompressor),
+  # so the code is stored uncompressed; it only makes the .cia slightly larger.
+  EnableCompress          : false
 
 AccessControlInfo:
   CoreVersion                   : 2
