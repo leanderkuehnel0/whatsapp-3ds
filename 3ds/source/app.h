@@ -229,6 +229,7 @@ float audio_mic_level(void);     // 0..1, for the level meter
 float audio_peer_level(void);    // 0..1, loudness of the other side
 typedef struct {
 	u32 received, played, late, inactive, bad, underruns;
+	u32 buffer_ms, target_ms;
 } AudioCallStats;
 void  audio_call_stats(AudioCallStats *out);
 // voice-message recording (16 kHz ADPCM frames, max 2 minutes)

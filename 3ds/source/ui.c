@@ -851,8 +851,9 @@ static void draw_top_call(void)
 		AudioCallStats cs;
 		audio_call_stats(&cs);
 		char d[96];
-		snprintf(d, sizeof d, "Incoming audio: %lu frames, %lu played, %lu late, %lu gaps",
-		         (unsigned long)cs.received, (unsigned long)cs.played, (unsigned long)cs.late, (unsigned long)cs.underruns);
+		snprintf(d, sizeof d, "In: %lu frames, %lu skipped, %lu gaps, buffer %lu/%lu ms",
+		         (unsigned long)cs.received, (unsigned long)cs.late, (unsigned long)cs.underruns,
+		         (unsigned long)cs.buffer_ms, (unsigned long)cs.target_ms);
 		text(d, TOP_W / 2, 6, 0.38f, COL_MUTED, C2D_AlignCenter);
 		float p = audio_peer_level();
 		rect(120, 30, 160, 4, C2D_Color32(0x26, 0x32, 0x38, 0xFF));

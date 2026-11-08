@@ -1,6 +1,7 @@
 // Audio: microphone capture (calls and voice-message recording), call playback, ringtones,
 // and a streaming player for voice messages. Uses the MIC service and the DSP via ndsp.
 #include "app.h"
+#include "jitter.h"
 
 #include <malloc.h>
 #include <math.h>
@@ -11,10 +12,11 @@
 #define CH_RING  1
 #define CH_CLIP  2
 
-// playback ring of 20 ms buffers
-#define NBUF        16
-#define MAX_QUEUED  8   // ~160 ms; newer audio is dropped beyond this to keep latency down
-#define PREBUFFER   2   // silent buffers queued after an underrun to absorb network jitter
+// call playback: incoming frames go into a jitter buffer and are handed to the DSP at a
+// steady rate, a few 20 ms buffers ahead
+#define NBUF        8
+#define DSP_AHEAD   4   // 80 ms queued in the DSP covers slow main-loop frames
+static Jitter jit;
 
 static bool       dsp_ok;
 static ndspWaveBuf wbuf[NBUF];
@@ -208,6 +210,9 @@ bool audio_call_begin(void)
 		audio_record_discard(); // an incoming call wins over a half-done recording
 	memset(&stats, 0, sizeof stats);
 	peer_level = 0;
+	jb_reset(&jit);
+	if (dsp_ok)
+		ndspChnWaveBufClear(CH_VOICE);
 	return mic_start(MIC_CALL);
 }
 
@@ -216,6 +221,7 @@ void audio_call_end(void)
 	audio_ring(0);
 	if (dsp_ok)
 		ndspChnWaveBufClear(CH_VOICE);
+	jb_reset(&jit);
 	if (mic_mode == MIC_CALL)
 		mic_stop();
 }
@@ -401,9 +407,12 @@ static void push_mic_sample(s16 s)
 	mic_prev = s;
 }
 
+static void voice_update(void);
+
 void audio_update(void)
 {
 	clip_update();
+	voice_update();
 	if (!mic_on)
 		return;
 	u32 pos = micGetLastSampleOffset();
@@ -436,20 +445,32 @@ static ndspWaveBuf *free_buf(void)
 	return NULL;
 }
 
-static void enqueue(const s16 *pcm, int n)
+// Moves audio from the jitter buffer to the DSP, keeping DSP_AHEAD frames queued.
+static void voice_update(void)
 {
-	ndspWaveBuf *b = free_buf();
-	if (!b)
+	if (!dsp_ok || g_app.call_state != CALL_ACTIVE)
 		return;
-	s16 *dst = (s16 *)b->data_vaddr;
-	if (pcm)
-		memcpy(dst, pcm, n * sizeof(s16));
-	else
-		memset(dst, 0, n * sizeof(s16));
-	b->nsamples = n;
-	b->looping = false;
-	DSP_FlushDataCache(dst, n * sizeof(s16));
-	ndspChnWaveBufAdd(CH_VOICE, b);
+	u64 now = osGetTime();
+	for (int q = queued(); q < DSP_AHEAD; q++) {
+		ndspWaveBuf *b = free_buf();
+		if (!b)
+			break;
+		s16 *dst = (s16 *)b->data_vaddr;
+		u32 dry = jit.underruns;
+		int n = jb_pop(&jit, dst, CALL_FRAME, q, now);
+		if (jit.underruns != dry)
+			stats.underruns++;
+		if (!n)
+			break;
+		b->nsamples = n;
+		b->looping = false;
+		DSP_FlushDataCache(dst, n * sizeof(s16));
+		ndspChnWaveBufAdd(CH_VOICE, b);
+		stats.played++;
+	}
+	stats.late = jit.late / CALL_FRAME;
+	stats.buffer_ms = jb_buffered_ms(&jit);
+	stats.target_ms = jit.target_ms;
 }
 
 void audio_play_frame(const unsigned char *data, size_t len)
@@ -471,16 +492,6 @@ void audio_play_frame(const unsigned char *data, size_t len)
 			peak = abs(pcm[i]);
 	float l = peak / 32768.0f;
 	peer_level = l > peer_level ? l : peer_level * 0.85f;
-	int q = queued();
-	if (q >= MAX_QUEUED) {
-		stats.late++;
-		return; // too far behind: drop to catch up
-	}
-	if (q == 0) {
-		stats.underruns++;
-		for (int i = 0; i < PREBUFFER; i++)
-			enqueue(NULL, CALL_FRAME);
-	}
-	enqueue(pcm, n);
-	stats.played++;
+	jb_push(&jit, pcm, n, osGetTime());
+	voice_update(); // start playing right away if the buffer just filled up
 }
