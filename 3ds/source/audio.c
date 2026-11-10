@@ -41,6 +41,18 @@ static float level;
 static AudioCallStats stats;
 static float peer_level;
 
+// Echo control. Through the speakers, the other person's voice reaches the microphone and
+// they hear themselves a moment later. While their voice is playing (and shortly after) the
+// microphone is turned down. With headphones there is no echo and the mic is left alone.
+#define DUCK_PEAK     1200   // playback louder than this (of 32768) counts as their voice
+#define DUCK_TAIL_MS  150    // room echo plus microphone delay after the sound ends
+#define DUCK_GAIN     0.1f   // microphone level while ducked (-20 dB)
+#define HP_CHECK_MS   1000
+static bool  speaker;        // call audio is on the speakers (no headphones plugged in)
+static u64   hp_checked;
+static u64   duck_until;
+static float duck_gain = 1.0f;
+
 typedef enum { MIC_OFF, MIC_CALL, MIC_RECORD } MicMode;
 static MicMode mic_mode;
 
@@ -87,7 +99,7 @@ static void make_ringtone(void)
 static void setup_channel(int ch, float vol)
 {
 	ndspChnReset(ch);
-	ndspChnSetInterp(ch, NDSP_INTERP_LINEAR);
+	ndspChnSetInterp(ch, NDSP_INTERP_POLYPHASE); // cleaner than linear when going from 16 kHz to the DSP's rate
 	ndspChnSetRate(ch, CALL_RATE);
 	ndspChnSetFormat(ch, NDSP_FORMAT_MONO_PCM16);
 	float mix[12] = {0};
@@ -202,6 +214,20 @@ static void mic_stop(void)
 	level = 0;
 }
 
+// Echo control only applies when the sound comes out of the speakers.
+static void check_headphones(void)
+{
+	u64 now = osGetTime();
+	if (hp_checked && now - hp_checked < HP_CHECK_MS)
+		return;
+	hp_checked = now;
+	bool inserted = false;
+	// if the state can't be read, leave the microphone alone
+	speaker = dsp_ok && R_SUCCEEDED(DSP_GetHeadphoneStatus(&inserted)) && !inserted;
+}
+
+bool audio_speaker_mode(void) { return speaker; }
+
 bool audio_call_begin(void)
 {
 	audio_ring(0);
@@ -210,6 +236,10 @@ bool audio_call_begin(void)
 		audio_record_discard(); // an incoming call wins over a half-done recording
 	memset(&stats, 0, sizeof stats);
 	peer_level = 0;
+	duck_until = 0;
+	duck_gain = 1.0f;
+	hp_checked = 0;
+	check_headphones();
 	jb_reset(&jit);
 	if (dsp_ok)
 		ndspChnWaveBufClear(CH_VOICE);
@@ -367,6 +397,24 @@ float audio_mic_level(void) { return level; }
 float audio_peer_level(void) { return peer_level; }
 void  audio_call_stats(AudioCallStats *out) { *out = stats; }
 
+// Turns the microphone frame down while the other person's voice is on the speakers.
+// The level drops within one frame and comes back over three, so there are no clicks.
+static void duck_frame(void)
+{
+	float target = speaker && osGetTime() < duck_until ? DUCK_GAIN : 1.0f;
+	float next = target < duck_gain ? target : duck_gain + (1.0f - DUCK_GAIN) / 3;
+	if (next > target)
+		next = target;
+	if (duck_gain == 1.0f && next == 1.0f)
+		return;
+	float step = (next - duck_gain) / CALL_FRAME;
+	for (int i = 0; i < CALL_FRAME; i++) {
+		duck_gain += step;
+		frame[i] = (s16)(frame[i] * duck_gain);
+	}
+	duck_gain = next;
+}
+
 static void send_frame(void)
 {
 	// level meter: peak of this frame, decaying smoothly
@@ -385,6 +433,7 @@ static void send_frame(void)
 	}
 	if (g_app.call_muted || g_app.call_state != CALL_ACTIVE)
 		return;
+	duck_frame();
 	unsigned char out[4 + CALL_FRAME / 2];
 	size_t n = adpcm_encode(&enc, frame, CALL_FRAME, out);
 	net_send_binary("a", "AUD", out, n);
@@ -413,6 +462,8 @@ void audio_update(void)
 {
 	clip_update();
 	voice_update();
+	if (g_app.call_state == CALL_ACTIVE)
+		check_headphones();
 	if (!mic_on)
 		return;
 	u32 pos = micGetLastSampleOffset();
@@ -462,6 +513,16 @@ static void voice_update(void)
 			stats.underruns++;
 		if (!n)
 			break;
+		// this frame starts playing once the q frames ahead of it are done
+		int peak = 0;
+		for (int i = 0; i < n; i++)
+			if (abs(dst[i]) > peak)
+				peak = abs(dst[i]);
+		if (peak > DUCK_PEAK) {
+			u64 until = now + (u64)(q + 1) * 20 + DUCK_TAIL_MS;
+			if (until > duck_until)
+				duck_until = until;
+		}
 		b->nsamples = n;
 		b->looping = false;
 		DSP_FlushDataCache(dst, n * sizeof(s16));

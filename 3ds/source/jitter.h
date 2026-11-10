@@ -30,12 +30,14 @@
 #ifndef JB_EXCESS_HOLD_MS
 #define JB_EXCESS_HOLD_MS  500  // ... for this long: skip a frame
 #endif
+#define JB_FADE_MS         5    // ramp when playback restarts, so it doesn't click
 
 typedef struct {
 	int16_t  ring[JB_CAP];
 	int      head, len;      // samples
 	bool     buffering;
 	bool     resumed;        // audio arrived again after running dry
+	bool     fade_in;        // playback restarts: ramp the next frame up from silence
 	int      target_ms;
 	uint64_t dry_since, smooth_since, excess_since;
 	uint32_t underruns;      // times playback ran dry

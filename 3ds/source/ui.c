@@ -689,6 +689,11 @@ static void draw_camera(void)
 	}
 	if (!cam_frozen()) {
 		text(cam_is_front() ? "Front camera" : "Rear camera", BOT_W / 2, 50, 0.5f, COL_TEXT, C2D_AlignCenter);
+		if (cam_has_frame()) {
+			char f[24];
+			snprintf(f, sizeof f, "%d fps", cam_fps());
+			text(f, BOT_W / 2, 68, 0.4f, COL_MUTED, C2D_AlignCenter);
+		}
 		draw_compose_buttons("Switch", "X", "Take photo", "A", "Back", "B");
 		return;
 	}
@@ -861,8 +866,10 @@ static void draw_top_call(void)
 	}
 	if (!audio_available())
 		text("No sound: dump the DSP firmware with DSP1", TOP_W / 2, 212, 0.42f, COL_RED, C2D_AlignCenter);
-	else if (g_app.call_state == CALL_ACTIVE || g_app.call_state == CALL_CONNECTING)
-		text("Tip: use headphones to avoid echo", TOP_W / 2, 214, 0.4f, COL_MUTED, C2D_AlignCenter);
+	else if (g_app.call_state == CALL_CONNECTING)
+		text("Tip: headphones give the best sound", TOP_W / 2, 214, 0.4f, COL_MUTED, C2D_AlignCenter);
+	else if (g_app.call_state == CALL_ACTIVE && audio_speaker_mode())
+		text("Speaker on: mic dips while they talk (use headphones)", TOP_W / 2, 214, 0.4f, COL_MUTED, C2D_AlignCenter);
 	draw_toast();
 }
 

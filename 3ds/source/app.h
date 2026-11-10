@@ -227,6 +227,7 @@ void  audio_update(void);        // call every frame: reads the mic and sends au
 void  audio_play_frame(const unsigned char *frame, size_t len);
 float audio_mic_level(void);     // 0..1, for the level meter
 float audio_peer_level(void);    // 0..1, loudness of the other side
+bool  audio_speaker_mode(void);  // call audio plays through the speakers (no headphones)
 typedef struct {
 	u32 received, played, late, inactive, bad, underruns;
 	u32 buffer_ms, target_ms;
@@ -253,7 +254,8 @@ void  cam_switch(void);          // front <-> rear
 bool  cam_is_front(void);
 bool  cam_has_frame(void);
 bool  cam_frozen(void);
-bool  cam_snap(void);            // freeze the current frame
+int   cam_fps(void);             // preview frames per second
+bool  cam_snap(void);            // freeze the frame on screen as the photo
 void  cam_retake(void);
 void  cam_draw(float x, float y); // 320x240 preview
 bool  cam_jpeg(unsigned char **out, unsigned long *outlen, int quality);

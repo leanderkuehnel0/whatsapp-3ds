@@ -29,6 +29,7 @@ type CallManager struct {
 	selfSsrc      uint32
 	peerSsrcs     []uint32
 	actualPeerSet bool
+	rxOrder       seqGuard
 
 	firstPacketSent       bool
 	initialTransportSent  bool

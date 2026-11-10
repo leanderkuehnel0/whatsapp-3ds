@@ -13,6 +13,10 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#if __has_include(<netinet/tcp.h>)
+#include <netinet/tcp.h>
+#define HAVE_TCP_NODELAY 1
+#endif
 #include <sys/socket.h>
 
 #include <mbedtls/ctr_drbg.h>
@@ -240,6 +244,13 @@ static bool connect_blocking(const char *host, int port, unsigned char fp[32], c
 		// value through and can report an error for a connection that worked. If the connect
 		// really failed, the TLS handshake below fails on its first send/receive instead.
 	}
+
+#ifdef HAVE_TCP_NODELAY
+	// Call audio is a stream of small frames. Without this the system holds each one back
+	// until the previous one is acknowledged, which delays and clumps the microphone audio.
+	int one = 1;
+	setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+#endif
 
 	mbedtls_entropy_add_source(&entropy, entropy_source, NULL, 32, MBEDTLS_ENTROPY_SOURCE_STRONG);
 	const char *pers = "wa3ds";
