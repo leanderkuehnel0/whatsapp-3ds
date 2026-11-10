@@ -23,7 +23,10 @@ import (
 )
 
 // Call audio between bridge and 3DS: 16 kHz mono, 20 ms ADPCM frames.
-const callFrameSamples = 320
+const (
+	callSampleRate   = 16000
+	callFrameSamples = 320
+)
 
 // CallHub runs 1:1 voice calls through the vendored WaCalls VoIP stack and
 // relays their audio to and from the 3DS. One call at a time is supported.
@@ -37,6 +40,7 @@ type CallHub struct {
 	audioMu  sync.Mutex
 	encState adpcmState
 	peerBuf  []int16 // peer audio waiting to fill a 20 ms frame
+	mic      *micProcessor
 
 	// call audio diagnostics, logged every few seconds during a call
 	toClient, clientDrop, noClient, micFrames atomic.Int64
@@ -131,8 +135,8 @@ func (h *CallHub) logStats(id string, cm *call.CallManager) {
 			continue
 		}
 		st := &cm.Stats
-		log.Printf("Call %s audio: whatsapp->bridge pkts=%d stun=%d notrtp=%d otherpt=%d(last %d) ownssrc=%d nosession=%d srtperr=%d empty=%d decodeerr=%d decoded=%d | bridge->3ds frames=%d dropped=%d noclient=%d | 3ds->bridge frames=%d bridge->whatsapp pkts=%d",
-			id, st.Received.Load(), st.Stun.Load(), st.NotRtp.Load(), st.OtherPT.Load(), st.LastPT.Load(), st.OwnSsrc.Load(),
+		log.Printf("Call %s audio: whatsapp->bridge pkts=%d stun=%d notrtp=%d otherpt=%d(last %d) ownssrc=%d late=%d nosession=%d srtperr=%d empty=%d decodeerr=%d decoded=%d | bridge->3ds frames=%d dropped=%d noclient=%d | 3ds->bridge frames=%d bridge->whatsapp pkts=%d",
+			id, st.Received.Load(), st.Stun.Load(), st.NotRtp.Load(), st.OtherPT.Load(), st.LastPT.Load(), st.OwnSsrc.Load(), st.Late.Load(),
 			st.NoSession.Load(), st.Unprotect.Load(), st.Empty.Load(), st.Decode.Load(), st.Delivered.Load(),
 			h.toClient.Load(), h.clientDrop.Load(), h.noClient.Load(), h.micFrames.Load(), st.Sent.Load())
 	}
@@ -142,6 +146,7 @@ func (h *CallHub) resetAudio() {
 	h.audioMu.Lock()
 	h.encState = adpcmState{}
 	h.peerBuf = h.peerBuf[:0]
+	h.mic = newMicProcessor()
 	h.audioMu.Unlock()
 	h.toClient.Store(0)
 	h.clientDrop.Store(0)
@@ -323,9 +328,11 @@ func (h *CallHub) FeedMicAudio(frame []byte) {
 		return
 	}
 	h.micFrames.Add(1)
-	pcm := make([]float32, len(samples))
-	for i, s := range samples {
-		pcm[i] = float32(s) / 32768
+	h.audioMu.Lock()
+	if h.mic == nil {
+		h.mic = newMicProcessor()
 	}
+	pcm := h.mic.process(samples)
+	h.audioMu.Unlock()
 	cm.FeedCapturedPCM(pcm)
 }

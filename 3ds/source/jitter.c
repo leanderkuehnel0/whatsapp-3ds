@@ -53,6 +53,7 @@ void jb_push(Jitter *j, const int16_t *pcm, int n, uint64_t now)
 	j->len += n;
 	if (j->buffering && j->len >= MS(j->target_ms)) {
 		j->buffering = false;
+		j->fade_in = true;
 		j->dry_since = 0;
 		j->resumed = false;
 	}
@@ -81,21 +82,39 @@ int jb_pop(Jitter *j, int16_t *out, int n, int ahead, uint64_t now)
 			j->target_ms -= JB_STEP_MS / 2;
 		j->smooth_since = now;
 	}
-	// Far more queued than needed (a burst, or clock drift): skip a frame to cut the delay.
+	// Far more queued than needed (a burst, or clock drift): squeeze two frames into one to
+	// cut the delay. They are blended into each other, which is much less audible than
+	// cutting a frame out.
+	bool squeeze = false;
 	if (j->len > MS(j->target_ms + JB_EXCESS_MS)) {
 		if (!j->excess_since)
 			j->excess_since = now;
-		else if (now - j->excess_since > JB_EXCESS_HOLD_MS) {
-			drop_oldest(j, n);
-			j->late += n;
+		else if (now - j->excess_since > JB_EXCESS_HOLD_MS && j->len >= 2 * n) {
+			squeeze = true;
 			j->excess_since = now;
 		}
 	} else
 		j->excess_since = 0;
 
-	for (int i = 0; i < n; i++)
-		out[i] = j->ring[(j->head + i) % JB_CAP];
-	drop_oldest(j, n);
+	if (squeeze) {
+		for (int i = 0; i < n; i++) {
+			int a = j->ring[(j->head + i) % JB_CAP];
+			int b = j->ring[(j->head + n + i) % JB_CAP];
+			out[i] = (int16_t)((a * (n - i) + b * i) / n);
+		}
+		drop_oldest(j, 2 * n);
+		j->late += n;
+	} else {
+		for (int i = 0; i < n; i++)
+			out[i] = j->ring[(j->head + i) % JB_CAP];
+		drop_oldest(j, n);
+	}
+	if (j->fade_in) {
+		int ramp = MS(JB_FADE_MS) < n ? MS(JB_FADE_MS) : n;
+		for (int i = 0; i < ramp; i++)
+			out[i] = (int16_t)(out[i] * i / ramp);
+		j->fade_in = false;
+	}
 	return n;
 }
 

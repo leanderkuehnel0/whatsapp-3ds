@@ -96,7 +96,11 @@ func (m *CallManager) startSilenceKeepaliveLocked() {
 			case <-ticker.C:
 				m.mu.Lock()
 				ready := m.codec != nil && m.rtpSession != nil && m.srtpSession != nil && m.relay.HasConnection()
-				idle := time.Since(m.lastCaptureAt) > 120*time.Millisecond
+				// wa3ds: the microphone arrives over TCP from the console's WiFi and stalls
+				// for a few hundred ms now and then before catching up. Filling such a
+				// stall with silence put a hole into the middle of a sentence; only fill in
+				// once the microphone is really off (muted).
+				idle := time.Since(m.lastCaptureAt) > 400*time.Millisecond
 				if ready && idle {
 					if opus, err := m.codec.Encode(silence); err == nil {
 						m.sendOpusFrameLocked(opus)
@@ -110,8 +114,8 @@ func (m *CallManager) startSilenceKeepaliveLocked() {
 
 // MediaStats counts what happens to packets received from the relay (wa3ds addition).
 type MediaStats struct {
-	Received, Stun, NotRtp, OtherPT, OwnSsrc, NoSession, Unprotect, Empty, Decode, Delivered, Sent atomic.Int64
-	LastPT                                                                                         atomic.Int32
+	Received, Stun, NotRtp, OtherPT, OwnSsrc, Late, NoSession, Unprotect, Empty, Decode, Delivered, Sent atomic.Int64
+	LastPT                                                                                               atomic.Int32
 }
 
 func (m *CallManager) onRelayData(data []byte) {
@@ -141,6 +145,11 @@ func (m *CallManager) onRelayData(data []byte) {
 	if ssrc == m.selfSsrc {
 		m.mu.Unlock()
 		m.Stats.OwnSsrc.Add(1)
+		return
+	}
+	if !m.rxOrder.accept(ssrc, uint16(data[2])<<8|uint16(data[3])) {
+		m.mu.Unlock()
+		m.Stats.Late.Add(1)
 		return
 	}
 	if !m.actualPeerSet {
